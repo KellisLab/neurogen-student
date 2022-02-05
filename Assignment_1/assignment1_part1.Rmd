@@ -1,0 +1,455 @@
+---
+title: "Problem Set 1.1: Introduction to R and review of statistical methods."
+---
+
+**If you have not done so already, click on the gear icon to the right of the "knit" button and select "Use Visual Editor" (or press *Ctrl/Cmd+Shift+F4* ) to render the markdown in this document.**
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+You can execute chunks by clicking the *Run* button (green play button) in the top right of the chunk or by placing your cursor inside it and pressing *Ctrl/Cmd+Shift+Enter*. You can also execute individual lines by highlight the line and pressing *Ctrl/Cmd+Enter*.
+
+Lastly, you can add new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl/Cmd+Alt+I*, though for this assignment you won't need to.
+
+**When you are finished, save and download the notebook. You will need to submit it through Canvas once you have finished both sections.**
+
+Start by running this chunk which will load a necessary library and set up the work environment.
+
+```{r,warning=FALSE}
+library(dplyr, warn.conflicts = FALSE)
+pset_dat = c("p1_onset_vs_cag.tsv", "p2_de_counts_matrix.tsv")
+gcp_url = "https://storage.googleapis.com/neurogen-spring22-data/Assignment1"
+write_path = file.path("data_assignment1")
+dir.create(write_path, showWarnings = F, recursive = T)
+sapply(pset_dat, function(s){
+  download.file(file.path(gcp_url,s), file.path(write_path,s))
+})
+message("Good!")
+```
+
+# Part 1: Regression and Model Fitting
+
+## Background
+
+This part of the problem set will focus on introducing the R programming language while reviewing key statistical concepts. We will use R to apply these concepts on genomic data.
+
+For this part, we will make use of genotype data from Huntington's disease patients. [Huntington's disease](https://en.wikipedia.org/wiki/Huntington%27s_disease) (HD) is a rare age-associated degenerative disease caused by a mutation in the [Huntingtin (*HTT*) gene](https://en.wikipedia.org/wiki/Huntingtin). Approximately 1 in 10,000 people have a mutation where the repeats in this regions are expanded. A fully penetrant mutation will result in noticeable neuronal loss in the head of the [caudate nucleus](https://en.wikipedia.org/wiki/Caudate_nucleus) and ultimately brain-wide atrophy as the disease progresses. In humans, the *HTT* gene has a repeat region in exon 1 where the sequence `CAG` is present \~20 consecutive times. If this mutation results in \>40 CAG repeats the disease is considered fully penetrant and the individual will develop motor symptoms around 30-50 years of age as a result of striatal degeneration. If they have 36-40 CAG repeats, there is a 50% chance that they will produce offspring with HD, but they themselves may or may not develop it. It is known that the the length of the repeat region is strongly and inversely correlated with the age of motor symptom onset and the rate of progression.
+
+We have provided a data set that contains the CAG repeat length of 250 HD patients and the age at which they developed motor symptoms. You will inspect and visualize this data and then use it to fit a model that will hopefully allow us to predict the age of motor symptom onset for mutations lengths that we were unable to experimentally observe.
+
+## Reading and inspecting data
+
+Load the data into a data frame. Run the following chunk by clicking anywhere in the box and pressing *Ctrl/Cmd+Shift+Enter* or by pressing the green play button.
+
+```{r}
+df_cag = read.table("data_assignment1/p1_onset_vs_cag.tsv", header = T)
+```
+
+Let's take a look at the data. This line will print the first 10 rows of the data frame we just imported.
+
+```{r}
+head(df_cag, 10)
+```
+
+Our data is a data frame with two columns, `cag_length` and `age_of_onset` containing the donor's mutation repeat length and age of motor symptom onset, respectively.
+
+For many types of objects with names elements, including data frames, we can use `$` to select, view, and modify said named variable. For example, if we want to get the range of values in the `cag_length` column, we can do the following:
+
+```{r}
+range(df_cag$cag_length)
+```
+
+> Before we go further, if you are not familiar with R it will be useful to know that you can view the documentation for any function typing `?` in before the function name in the console (e.g. `?range`).
+
+With this in mind, use the `plot()` function to plot `age_of_onset` vs. `cag_length` in the chunk below.
+
+```{r}
+plot(
+  x = ..., # Fill this in
+  y = ..., # Fill this in
+  xlab = "CAG length",
+  ylab = "Age of onset",
+  )
+```
+
+> Note: While here just a placeholder, the `...` is an actual operator in R and in some contexts this would be a valid function call.
+
+For several numeric data types we can use the `summary()` function to get some useful descriptive statistics from our data.
+
+```{r}
+summary(df_cag)
+```
+
+The samples in our data set have a minimum of 36 CAG repeats, the lower threshold of disease penetrance at which the individual may or may not have symptoms, and a median of 42 repeats which represents full penetrance.
+
+In the following chunk, use `sd()` to compute the standard deviation of CAG repeat lengths in our data set.
+
+```{r}
+sd_cag = ... # Fill this in
+print(sd_cag)
+```
+
+## Model fitting and regression
+
+In biology it is often the case that experimental data is difficult or costly to generate. This is especially true when working with human specimens where sample scarcity is the limiting factor. Therefore, high quality data sets with large sample sizes are usually hard to come by. For this reason a contingent of computational biology is concerned with generating models from limited data. These models can be *explanatory*, that is to say they describe the relationship between variables and observations, or they can be *predictive*, meaning they can be used to make predictions about unobserved data. In this section we will use the `age_of_onset` vs. `cag_length` data set to generate a very simple type of model and evaluate it for both purposes.
+
+The simplest model we can generate is a straight line that tries to best map the values of independent variables (e.g. `cag_length`) to the observations (e.g. `age_of_onset`). You know this as *linear regression* or line of best fit. For the bivariate case, this line is of the form $$ \Large
+y_i= \beta_0 + \beta_i x_i,\quad i = 1, ..., n 
+$$
+
+where $\large y_i$ is the *i*-th observation, $\large x_i$ is value of the *i-*th independent variable, $\large \beta_i$ is the corresponding coefficient, $\large \beta_0$ is the intercept, and $\large n$ is the number of data points. When we say we want to "fit" a model, we are referring to finding the values of $\large \bar \beta$ which define the slope and intercept of the line which minimizes the estimated error or *residual*.
+
+The above equation can be expressed in the more computationally-friendly matrix notation as
+
+$$ \Large
+Y = X \bar{\beta}
+$$
+
+We can solve for $\large \bar \beta$ using the [*least squares method*.](https://en.wikipedia.org/wiki/Least_squares) The formula for computing $\beta$ using least squares in matrix notation is
+
+$$ \Large 
+\bar{\beta} = (X^{T} X)^{-1}X^{T}Y \text.
+$$
+
+The derivation of this formula is the beyond the scope of this course. Here we will simply use it.
+
+### The manual approach
+
+Here you will simply implement the least squares formula in R and use it to find the coefficients that yield the best linear model that fits our test data. We will use this model to predict age of motor symptom onset as a function of CAG length, and evaluate the quality of said prediction.
+
+We will begin by reformatting our data to permit matrix multiplication. First we create matrices from our data frame columns.
+
+```{r}
+X = matrix(df_cag$cag_length)
+Y = matrix(df_cag$age_of_onset)
+```
+
+Since we also need to be able to calculate the intercept $\beta_0$, which is not multiplied by any $\large x_i$, we need to modify `X` so that we can treat the intercept as another slope parameter and solve for all values of $\beta$ at once. We do this by prepending a column of 1's to `X`.
+
+```{r}
+X = cbind(rep(1, NROW(X)), X)
+head(X)
+```
+
+Next load the necessary libraries. This one in particular will provide use with the function `ginv` which allows us to compute the inverse of a matrix.
+
+```{r, message=FALSE, warning=FALSE}
+library(MASS, warn.conflicts = FALSE)
+```
+
+Now that we have everything set up, in the following write the code for computing $\beta$ by implementing the formula for least squares in matrix form. So that you don't have to keep scrolling, here is the formula again:
+
+$$
+\bar{\beta} = (X^{T} X)^{-1}X^{T}Y \text.
+$$Make use of the following functions and operators:
+
+-   `t()` is the function to transpose a matrix (e.g. `t(A)` = $A^{T}$ ).
+
+-   `ginv()` computes the inverse of a matrix (e.g. `ginv(A)` = $A^{-1}$ ).
+
+-   `%*%` is the operator for matrix multiplication. (e.g. `A %*% B` = $AB$ ).
+
+```{r}
+beta = ... # Fill in 
+print(beta)
+```
+
+The first element of `beta` is the intercept, and will be multiplied by the first column of `X` that consists of just 1's. The second element is the slope of our line of best fit. Now lets plug `beta` back into $\large Y=X\bar{\beta}$ to get the new $\large Y$ predicted by our model.
+
+```{r}
+Y_pred = ... # Fill this in
+```
+
+Let's plot the line of best fit.
+
+```{r}
+plot(df_cag$cag_length, df_cag$age_of_onset)
+abline(a = beta[1], b = beta[2], col = "blue")
+points(df_cag$cag_length, Y_pred, col = "red")
+```
+
+Not bad! At first glance it appears to fit our data quite well. The blue line is the line of best fit and the red points are the predicted $\large Y$ values given that fall along this line.
+
+### The R approach
+
+Now we will repeat the regression using R's built-in `stats` package which will allow us to do what we just did and more with just few lines of simple code.
+
+We will use the `lm` fit function to fit a linear model to the test data.
+
+> If you haven't done so, take some time to look at the documentation (`?lm`). You will see the following:
+>
+>     lm(formula, data, subset, weights, na.action,
+>        method = "qr", model = TRUE, x = FALSE, y = FALSE, qr = TRUE,
+>        singular.ok = TRUE, contrasts = NULL, offset, ...)
+>
+> Many statistical and plotting functions in R accept a `formula` argument that describes the relationship between the variables symbolically rather than passing values directly (although you can if you wish). Usually, these are column names of the data frame or matrix passed to the `data`. This formula is used internally to produce a [model (or design) matrix](https://en.wikipedia.org/wiki/Design_matrix) that will be used to compute the line of best fit.To create a formula we write an equation with the dependent variables on the left-hand side and the independent variables on the right, separated by `~`.
+
+Before invoking `lm()` Let's first use a formula to construct a model matrix directly by calling the `model.matrix()` function.
+
+```{r}
+X_form = model.matrix(age_of_onset ~ cag_length, data = df_cag)
+head(X_form)
+```
+
+This `X_form` is exactly the same as the matrix `X` that we manually constructed earlier.
+
+```{r}
+all(X_form == X)
+```
+
+It even includes the column of 1's needed to compute the intercept. This column is automatically added unless the intercepts is explicitly specified in the formula (e.g. `age_of_onset ~ 0 + cag_length`).
+
+Since this matrix will be generated automatically, we need only pass the formula and the data frame `df_cag` to the model-fitting function.
+
+```{r}
+model <- lm(formula = age_of_onset ~ cag_length, data = df_cag)
+print(model)
+```
+
+> If we print `model` it shows the coefficients, which we can see are identical to the `beta` that we manually computed earlier.... sort of. They differ after about 10 digits past the decimal point. The reason being due to the way the computations are performed to slightly different degrees of numerical precision under-the-hood by different functions. We can see by how much they differ.
+
+```{r}
+all(model$coefficients == c(beta))
+mean(abs(model$coefficients - beta))
+```
+
+> For all intents and purposes, the difference is negligible.
+
+Returning to output of `lm()`, we can see that `model` is a list containing much more than just the $\beta$ values.
+
+```{r}
+names(model)
+```
+
+It contains the residuals, the QR decomposition, the predicted $Y$ values (i.e. `Y_pred`), among other things and we can get even more possible outputs by changing the default parameters, but for now we'll use these. Let's plot the fitted line and predicted values.
+
+```{r}
+plot(df_cag$cag_length, df_cag$age_of_onset)
+abline(model, col = "blue")
+points(df_cag$cag_length, model$fitted.values, col = "red")
+```
+
+Does this look familiar?
+
+There are other useful functions that accept the output of `lm()` directly, such as `predict()` which will give us predicted values for `age_of_onset` given new CAG lengths.
+
+```{r}
+cag_new = c(10, 26, 60)
+pred_new = predict(model, newdata = data.frame(cag_length = cag_new))
+names(pred_new) = paste("CAG", cag_new)
+pred_new
+```
+
+Our model predicts an age of symptom onset of \~90 and \~66 for CAG lengths of 10 and 26. We know this isn't true given that the disease penetrance threshold is 36 (although an unusually small CAG length of 10 might be concerning for other reasons). However the predicted age of onset for for a CAG length of 60 seems more realistic, does it not?
+
+Before we start (or continue) making predictions, we should make sure that the model explains the data that is present to begin with. Let's take a look at the residuals to get a sense of how well our model fits our test data. If the model is a good fit, the residuals should be normally (randomly) distributed. Plot `age_of_onset` vs. the residuals given in `model`. Remember you can use `$` to access the elements of a named list (e.g. `model$residuals`).
+
+```{r}
+plot(x = ..., y = ... )# Fill this in
+```
+
+That doesn't look very random. Use the `cor()` function to compute the Pearson's correlation between `age_of_onset` and the residuals.
+
+```{r}
+cor(x = ... , # Fill this in
+    y = ... , # Fill this in
+    method = "p")
+```
+
+Not only is it not random, it's decently correlated. This is because despite our pretty looking plots, the data is not actually linear. This (nevertheless realistic) data set was artificially generated from a non-linear distribution. Let's see if we can figure out which kind.
+
+Load the `fitdistrplus` library and extract our `cag_length` values.
+
+```{r, message=FALSE, warning=FALSE}
+library(fitdistrplus, warn.conflicts = FALSE)
+x = df_cag$cag_length
+```
+
+Now run the following line by line and see how well each type of distribution fits our data.
+
+```{r}
+fitdist(x, distr = "norm") %>% plot   # Normal distribution
+fitdist(x, distr = "unif") %>% plot   # Uniform distribution
+fitdist(x, distr = "exp") %>% plot    # Exponential distribution
+fitdist(x, distr = "cauchy") %>% plot # Cauchy distribution
+fitdist(x, distr = "gamma") %>% plot  # Gamma distribution
+fitdist(x, distr = "nbinom") %>% plot # Negative binomial distribution
+fitdist(x, distr = "pois") %>% plot   # Poisson distribution
+fitdist(x, distr = "geom") %>% plot   # Geometric distribution
+```
+
+Question: Which distribution was used to generate the CAG length data set? Enter your response in the box below.
+
+    Answer:
+
+# Part 2: Hypothesis Testing
+
+## Background
+
+Biological systems are generally variable and noisy and sample sizes are smaller often than we would like, so when trying to draw conclusions from experimental data we rarely have the luxury of certainty. We have to ask ourselves how likely it is that we would see the same observed effect if we had different samples, or cleaner data, or conducted the experiment on a Tuesday afternoon instead of Friday morning (yes, there are real cases where this would make a difference). So how do we convince ourselves that the effect we observe (or don't) is real and reproducible?
+
+We will now review the concept of testing for statistical significance, which is perhaps the single most common type of analysis performed in both experimental and computational biology. Significance testing quantifies the extent to which we can be convinced that whatever we observed in our experiment is real and didn't happen by chance.
+
+In genomics specifically, this type of test is most often seen when determining if a gene is differentially expressed, that is to say the expression of the gene is substantially altered in a condition (e.g. disease, chemical exposure, experimental perturbation, etc.) relative to some baseline called the *control* condition.
+
+In this part of the assignment we are going to use a small (but real) RNA-seq data set to manually perform differential expression analysis in a way that illustrates the concept of significance testing. We will quantify the change (or lack of) in expression of a set of genes for a set of 3 healthy mice and 3 "sick" mice. The sick mice have been given a mutation that results in the expression of a toxic form of the human *HTT* gene containing 160 CAG repeats, and is known as the [R6/2 mouse model](https://www.jax.org/strain/002810) of Huntington's disease.
+
+## Differential expression the hard way
+
+Let's load and inspect the data.
+
+```{r}
+df_counts = read.table("data_assignment1/p2_de_counts_matrix.tsv",
+                       header = T, row.names = 1)
+head(df_counts)
+```
+
+Our data is in the form of a count matrix. There are different kinds of count matrices and they will be discussed in much greater detail in future lectures and problem sets, but most have the same common format. Each column corresponds to a sample (a mouse) and each row to a gene. The entries of this particular matrix correspond to the number of unique transcripts of each gene that were sampled and sequenced from each mouse.
+
+Before we can do any type of analysis, we have to preprocess our data. First we need to convert it to a matrix (in the programming sense).
+
+```{r}
+cts = as.matrix(df_counts)
+head(cts)
+```
+
+Then in order to perform any type of statistical analysis, we must ensure that the variables are comparable. For that to be the case, we have to normalize the counts so that they are on the same scale across all samples. There are many ways to normalize count data. Here we will simply normalize by dividing each column by it's library size (i.e. the sum of the elements in the column) and multiplying all columns by the median library size.
+
+Formally, let $\large \mathbf{\bar x_j}$ be the *j*-th normalized column computed by
+
+$$ \Large
+\mathbf{\bar x_{j}} = M \frac{\mathbf{x_j}}{\sum{\mathbf{x_j}} }, \quad j=1,...,n 
+$$
+
+where $\large x_j$ is the *j*-th column of the matrix and
+
+$$ \Large
+M=\text{median} \bigg (\sum{\mathbf{x_1}}, ..., \sum{\mathbf{x_n}} \bigg ) \text.
+$$
+
+Use the functions `colSums()` and `median()` to normalize the count matrix `cts`. Make sure that the columns of the resulting matrix are in the same order and have the same column names as `cts`.
+
+```{r}
+cts_norm = ... # Fill this in
+```
+
+To compute the change in expression we need to compute the row-wise means for all samples in each experimental group separately. The following line splits the normalized count matrix by using the column names and returns a named list of matrices each containing only the columns of the named group.
+
+```{r}
+cts.list = sapply(c("Control", "HD"), function(x){
+  cts_norm[, grep(colnames(cts_norm), pattern = x)]
+}, simplify = F)
+
+lapply(cts.list, head) # This line calls head() on each matrix of the list.
+```
+
+Now we compute (within each group) the mean expression across all samples for all genes. We can easily do this in a single line as follows.
+
+```{r}
+group_means = sapply(cts.list, function(mat) rowMeans(mat))
+head(group_means)
+```
+
+> If you're not familiar with the "apply" family of functions in R, the above lines might seem cryptic. If you will be making extensive use of R in the future, it is important to understand what these are and what they do. [Here](https://ademos.people.uic.edu/Chapter4.html) is a good resource to familiarize yourself with the various types of apply functions. if you are familiar with the `lambda` and `map` functions in Python, the following two blocks of code are analogous:
+>
+>     # R
+>       sapply(val, function(x) x^2 )
+>
+>     # Python
+>       list(map(lambda x: x**2, val))
+>
+> In short, the R language is designed to discourage the use of loops such as `for` and `while` in favor apply functions. Although you can use `for` and `while`, they are slow and inefficient in comparison, and often more verbose and cumbersome to implement.
+
+Now that we have the mean gene expression for both our control and disease groups, use the following formula to compute the log-fold change for each gene:
+
+$$\Large
+\text{LFC} = log_2 \bigg( \frac{
+\bar \mu_{ \small \text{HD} }
+}{
+\bar \mu_{ \small \text{Control} }
+} \bigg )
+$$
+
+where $\large \bar \mu_{\text{HD}}$ and $\large \bar \mu_{\text{Control}}$ are the means comprising the columns of `group_means`.
+
+```{r}
+lfc = ... # Fill this in
+summary(lfc)
+```
+
+Now that we've computed our effect sizes (i.e. the log-fold change of each gene), we can use a statistical test to assign a *p*-value to each observation.
+
+There are countless statistical tests that can be used to test our hypothesis of differential expression. Two of the most commonly applied for this purpose are the [*t*-test](https://en.wikipedia.org/wiki/Student%27s_t-test) and the [Wilcoxon rank-sum test](https://en.wikipedia.org/wiki/Mann%E2%80%93Whitney_U_test).
+
+-   *t*-test is an example of a *parametric* test, meaning it uses the statistical parameters of the distribution (e.g. mean and variance of the values in the sample) to compute a test statistic.
+
+-   Wilcoxon rank-sum test is a *nonparametric* test. As the name implies, it operates on the ranks of the values rather than the values themselves.
+
+We'll start with the *t*-test. We'll make some assumptions about our data, which may not necessarily be true here or in general, but will simplify the implementation. We will use much more fancy and involved methods for computing differential expressions and test statistics later in the course.
+
+For now we will assume that for all genes the expression values in both conditions are normally distributed and have equal variance. This allows us to use the simple two-sample *t*-test without any modification. We can compute the *t*-statistic as follows:
+
+$$ \Large
+t = \frac{\mu_1-\mu_2}{s_p \sqrt{\frac{1}{n_1} + \frac{1}{n_2}}}
+$$
+
+where
+
+$$ \Large
+s_p = \sqrt{ \frac{ (n_1 - 1) \sigma_1^2 + (n_2 - 1) \sigma_2^2}{ n_1 + n_2 - 2} } \text .
+$$
+
+In this formula $\large \mu$ are the means of the samples in each group, $\large n$ are the sample sizes, $\large \sigma$ are the standard deviations, and $\large s_p$ is the pooled standard deviation. Once we have this, the *t*-statistic can be used to calculate the *p*-value.
+
+In the following chunk, implement the above formulas to compute `t_stat`, the *t*-statistic, for each gene in our data set. To automate the process for all genes, we will use `apply()` to iterate over the rows of our matrix and return a single vector of *p*-values. In the following code `x1` and `x2` correspond to vectors of gene counts for the control and disease groups, respectively. Use these in your formula. Once you have a working formula, the last line in the `apply` block will compute and return the *p*-value. Do not modify this line.
+
+```{r}
+p_tstat_man = apply(cts_norm, 1, function(r){
+
+  x1 = r[1:3] # Vector of control values
+  x2 = r[4:6] # Vector of disease values
+  
+  t_stat = ... #Fill this in
+  
+  p = 2*pt(abs(t_stat), df = 4, lower.tail = F) # Do not edit
+  })
+```
+
+Now that you've computed the *t*-statistic by hand, we will use th `t.test()` function in the `stats` package and compare the p-values against our own. Make sure the output is `TRUE`.
+
+```{r}
+p_tstat_r = apply(cts_norm, 1, function(r){
+  t.test(r[1:3], r[4:6], var.equal = T)$p.value
+  })
+all.equal(p_tstat_man, p_tstat_r)
+```
+
+Now lets compile a data frame with our results.
+
+```{r}
+df_deg = data.frame(lfc = lfc, p_val = p_tstat_r)
+df_deg[order(df_deg$p_val, decreasing = F),]
+```
+
+Question: What relationship do you notice between the log-fold change and the *p*-value? Enter your response in the box below.
+
+    Answer:
+
+Now we will repeat the *p*-value calculation using our nonparametric candidate test. We won't do any manual calculation this time. Just run the following chunk.
+
+```{r}
+p_wil = apply(cts_norm, 1, function(r){
+  wilcox.test(x = r[1:3], y = r[4:6])$p.value
+  })
+df_deg_wilcox = data.frame(lfc = lfc, p_tstat = p_tstat_r, p_wilcox = p_wil)
+df_deg_wilcox[order(df_deg_wilcox$p_wilcox, decreasing = F),]
+```
+
+What happened here? It doesn't look quite as nice. It's because we have too few samples for this test to be useful. However, for much larger data sets the *U* statistic becomes fairly normally distributed and the two methods would give is very similar results.
+
+# Going forward
+
+In this problem set we applied some simple analysis techniques to illustrate some of the ways that this type of data are treated. However, these simple approaches are usually insufficient in any real context. Generally, much more sophisticated techniques are needed to account for several factors that we ignored today, but at a very high level they don't do anything much different from what you saw here.
+
+With this in mind, in the next section you will do something very similar to what you did here but instead using Python and Jupyter to run other common types of analysis in simplified context.
+
+**Remember to save and download the notebook.**
