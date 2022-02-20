@@ -29,6 +29,8 @@ We will analyze bulk RNA-seq data from the striatum of 6 month old allelic serie
 We refer to these an allelic series because each type of mouse in the series contains an allele of *Htt* with a different polyQ length.
 Specifically lengths of 20, 80, 92, 111, 140, and 175 polyglutamine repeats (denoted as Q20, Q80, Q92, Q111, Q140 and Q175).
 
+![Data summary figure](data/r3_fig1.png)
+
 ## Loading and pre-processing expression data
 
 Load the expression data and related sample metadata.
