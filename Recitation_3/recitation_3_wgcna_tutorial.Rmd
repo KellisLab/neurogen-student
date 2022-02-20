@@ -1,0 +1,639 @@
+---
+title: "WGCNA Tutorial"
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+*If you have not done so already, click on the gear icon to the right of the "knit" button and select "Use Visual Editor" (or press \*Ctrl/Cmd+Shift+F4\* ) to render the markdown in this document.*
+
+Load the required libraries and download the necessary data.
+
+```{r, warning=FALSE, message=FALSE}
+suppressPackageStartupMessages({
+  library(WGCNA)
+  library(tidyverse)
+  library(ggdendro)
+  allowWGCNAThreads(nThreads = BiocParallel::multicoreWorkers())
+})
+
+dir.create("data", recursive = T, showWarnings = F)
+system("gsutil -m cp -r gs://neurogen-spring22-data/Recitation3/* data/")
+```
+
+# Weighted Gene Coexpression Network Analysis (WGCNA)
+
+In this tutorial, we will reproduce some of the analysis from [Langfelder et al. (2016)](https://www.nature.com/articles/nn.4256).
+We will use the WGCNA R package to identify gene modules correlated with the length of the polyQ tract in a mouse model of Huntington's disease (HD).
+We will analyze bulk RNA-seq data from the striatum of 6 month old allelic series HD mouse models.
+We refer to these an allelic series because each type of mouse in the series contains an allele of *Htt* with a different polyQ length.
+Specifically lengths of 20, 80, 92, 111, 140, and 175 polyglutamine repeats (denoted as Q20, Q80, Q92, Q111, Q140 and Q175).
+
+## Loading and pre-processing expression data
+
+Load the expression data and related sample metadata.
+The expression data is in the form of already normalized counts.
+
+```{r}
+df_cts = read.table("data/r3_striatum_allelic_wgnca_processed.tsv", sep = "\t", header = T, row.names = 1)
+metadata = read.table("data/r3_striatum_allelic_wgnca_metadata.tsv", sep = "\t", header = T)
+```
+
+Unfortunately WGCNA uses non-standard convention when dealing with data frames.
+Rather than have features as rows, it takes them as columns, which causes considerable slowdown in program performance R uses column-major ordering.
+
+We'll transpose the matrix and re-convert it to a data frame since R will automatically change the data type following transposition to a non-compatible matrix.
+
+```{r}
+datExpr0 = as.data.frame(t(df_cts))
+```
+
+## Check data for missing values and outliers
+
+We first check for genes and samples with too many missing or zero counts.
+
+```{r}
+gsg = goodSamplesGenes(datExpr0, verbose = 3)
+gsg$allOK
+```
+
+The last statement returns `FALSE`, suggesting that some features have either missing counts or zero variance.
+These must be removed before continuing.
+Likewise, entire samples containing too many zero or missing entries should also be dropped.
+
+```{r}
+# Number of genes and samples that were removed:
+paste("Bad genes:", sum(!gsg$goodGenes))
+paste("Bad samples:", sum(!gsg$goodSamples))
+# Remove the offending genes and samples from the data:
+datExpr0 = datExpr0[gsg$goodSamples, gsg$goodGenes]
+```
+
+Next we cluster the samples using one or several of many potential distance metrics to identify outliers based on transcriptomic distance.
+See `?hclust` for the possible built-in metrics.
+Some distance metrics are more robust or sensitive than others.
+You could potentially also manually cluster the samples using a metric better suited for transciptomes such as the Jensen-Shannon distance.
+We will use `average`, but feel free to try some of the other potential metrics and compare the results.
+
+```{r}
+sampleTree = hclust(dist(datExpr0), method = "average");
+## Some other options:
+# sampleTree = hclust(dist(datExpr0), method = "complete");
+# sampleTree = hclust(dist(datExpr0), method = "mcquitty");
+# sampleTree = hclust(dist(datExpr0), method = "ward.D");
+  
+ggdendrogram(sampleTree) + ggtitle("Sample clustering to detect outliers")
+```
+
+Using any of the above metrics, there seem to be no outliers, but if there were, we might want to adjust `cutHeight` below to trim the tree at a height that would remove the offending samples.
+To demonstrate how this would work change the value of `cutHeight` to something less than the height of the tree (i.e. 300,000 if using average distance).
+
+```{r}
+# Determine cluster under the line
+cutHeight = 300000
+clust = cutreeStatic(sampleTree, cutHeight = cutHeight, minSize = 1)
+ggdendrogram(sampleTree) + 
+  geom_abline(slope = 0, intercept = cutHeight, color = "red") +
+  ggtitle("cutHeight")
+table(clust)
+```
+
+The results is a tree that has been "cut" into multiple sub-trees (clusters).
+In the chunk below, we would select the cluster containing the non-outliers.
+However, since we have no actual outliers, remember to set the `cutHeight` to a value taller than the tree before continuing, so as to not drop any samples from the data set.
+
+```{r}
+# clust 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+datExpr = datExpr0[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+```
+
+## Preparing trait data
+
+For WGCNA to work, we need to convert all the relevant metadata that we would like to use as variables of interest into numeric values.
+Just as in differential expression analysis, we must be careful in how we do this.
+Numeric values can be categorical, where order and value has no meaning (e.g. sex, batch, disease group), or ordinal, in which the order is relevant and the numeric values can be expected to correlate with our data (e.g. age, marker expression, time point).
+In our case, `Q_length` should be ordinal, since we want our mapped numeric value to be in the order of increasing size corresponding to increasing length, as we expect gene expression to correlate with this value.
+On the other hand, sex is categorical and since it has only two possible values in can simply be binarized.
+Similarly, replicate, an uninformative variable, will be a categorical.
+Though we wouldn't normally retain this variable, we will keep it to demonstrate the what happens when we use an uninformative trait.
+
+```{r}
+traitData = metadata
+
+message("Original vars: ", paste(names(traitData), collapse = " "))
+# remove columns that hold information we do not need.
+datTraits = traitData[, -1]
+message("Retained vars: ", paste(names(datTraits), collapse = " "))
+datTraits$Q_length = as.numeric(factor(datTraits$Q_length))
+datTraits$Sex = factor(datTraits$Sex, levels = c("M", "F")) %>% as.numeric()
+```
+
+We now have the variables `datExpr` and `datTraits` containing the counts and trait data, respectively.
+Before we continue with network construction and module detection, let's visualize how the traits cluster with the samples.
+
+```{r}
+# Re-cluster samples
+sampleTree2 = hclust(dist(datExpr), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits, signed = FALSE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+                    groupLabels = names(datTraits), 
+                    main = "Sample dendrogram and trait heatmap")
+```
+
+## Automatic construction of the gene network and identification of modules
+
+"Constructing a weighted gene network entails the choice of the soft thresholding power $\beta$ to which co-expression similarity is raised to determine adjacency in the network. We will chose the soft thresholding power based on the criterion of approximate scale-free topology. Here we use the function `pickSoftThreshold` that performs the analysis of network topology and aids us in choosing a proper power."
+
+What all these cryptic buzzwords taken directly from the WGCNA documentation mean is that we're gonna chose an exponent that scales our yet-to-be-computed pair-wise gene correlations in such a way that we can more easily identify outliers.
+Run this and we'll see how that works.
+
+```{r}
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+```
+
+We will use the generated plot to select a candidate powers based on when the curve appears to saturate.
+We prefer a lower exponent as it will make network construction much easier and faster.
+In choosing too large values we also risk getting nonsense results.
+
+```{r}
+# Scale-free topology fit index as a function of the soft-thresholding power
+idx = sft$fitIndices[,1]
+mf =  -sign(sft$fitIndices[,3])*sft$fitIndices[,2]
+
+plot.list = list(
+  scale = ggplot() + 
+  geom_text(aes(x = idx, y = mf, label = idx)) + 
+  geom_abline(slope = 0, intercept = 0.7, color = "red") + 
+  labs(title = "Scale independence", x = "Soft Threshold (power)", y = "Scale Free Topology Model Fit,signed R^2"),
+  mean = ggplot() + 
+  geom_text(aes(x = idx, y = sft$fitIndices[,5], label = idx)) + 
+  labs(title ="Mean Connectivity", x = "Soft Threshold (power)", y = "Mean Connectivity")
+)
+
+cowplot::plot_grid(plotlist = plot.list, ncol = 2)
+```
+
+The left panel shows the scale-free fit index (y-axis) as a function of the soft-thresholding power (x-axis).
+The right panel displays the mean connectivity (degree, y-axis) as a function of the soft-thresholding power (x-axis).
+We will choose 6, a nice, round, small number for which the scale-free topology fit index curve starts to flattens out upon reaching a reasonable high value (in this case 0.7).
+You can go higher at the (very significant) cost of memory and run-time.
+If your data is clean, this algorithm will almost always spit out an optimal power between 6 and 8, so sometimes we skip this.
+
+### Network construction and module detection
+
+WGCNA starts by constructing a matrix of pairwise correlations between all pairs of genes across the samples in a data set.
+The core of the algorithm is the `blockwiseModules` function below, which is responsible for generating the adjacency matrix (aka the network) and clustering it to identify "modules" of genes that "move together" so to speak.
+
+The `networkType` determines the type of adjacency matrix that will be generated to represent our network.
+The default is "unsigned" (an undirected network), but we'll change it to a "signed" (i.e. directional) network which works better for our data.
+"signed hybrid" in this case means that when the pairwise gene correlation is computed, and an edge is added if the correlation is positive.
+To minimize effects of possible outliers, biweight midcorrelation (`bicor`) is used as the correlation method (`corType`).
+`maxPOutliers` determines the percentile for which correlation values are to be considered outliers.
+The `power` argument is what we determined previously, which is simply just the exponent that the correlation is raised to, which also determines the weight of the edge.
+This procedure has the effect of suppressing low correlations that may be due to stochastic variability.
+The resulting adjacency matrix has signed edges only for pairs of positively correlated genes above the percentile cutoff.
+The matrix is then heirarchically clustered to define partitioned "gene modules".
+
+The remaining preset parameters are unimportant are determine the memory usage and run time of the algorithm.
+Run the following chunk and go have a snack, it will take a while.
+WGCNA uses very slow and obsolete network construction algorithms (after all, it was published in 2008).
+
+```{r, warning=FALSE}
+# This line is essentally a bug fix to redefine the 'cor' function. Otherwise WGCNA will use the wrong correlation function.
+cor <- WGCNA::cor 
+
+# Construct the adjacency matrix
+net = blockwiseModules(datExpr, power = 6, corType = "bicor", maxPOutliers =  0.05, 
+                        networkType = 'signed hybrid', 
+                        maxBlockSize = 55000, pamRespectsDendro = FALSE)
+
+# Undo the bug fix.
+cor <- stats::cor
+
+# List the modules that were identified and their sizes
+table(net$colors) 
+```
+
+Once that's done, we can plot a dendrogram of the results.
+
+```{r}
+# Very old way of telling R to open a graphics window
+sizeGrWindow(12, 9)
+# Convert labels to colors for plotting
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+The resulting plot is a dendrogram of modules identified in this network.
+Each little vertical line represents a gene.
+Let's assign the relevant parts of the output to variables for downstream analysis.
+
+```{r}
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+```
+
+## Relating modules to traits
+
+In this analysis we would like to identify modules that are significantly associated with the traits or variables of ineterest.
+Since we already have a summary profile (i.e. eigengenes) for each module, we can correlate eigengenes with traits and look for the most significant associations.
+
+```{r}
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+```
+
+Now let's use these conventient wrapper functions provided by the package to generate a heatmap of our module-trait relationships.
+
+```{r}
+sizeGrWindow(6,10)
+# Will display correlations and their p-values
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                           signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(2, 8, 3, 3));
+
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = F,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = T,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = ("Module-trait relationships"))
+```
+
+The numbers in each cell are correlations and *p*-values.
+In the above Module-trait associations, each row corresponds to a module eigengene, column to a trait.
+Each cell contains the corresponding correlation and p-value.
+The analysis identifies several significant module--trait associations.
+There's clearly nothing interesting associated with age, and there's some sketchy modules that seems to originate from cross-sample variability (yellow/black).
+The strongest relationships are with polyQ length, as expected.
+We will focus on `Q_length` for the remainder of the tutorial.
+
+## Gene Significance and Module Membership
+
+We quantify associations of individual genes with our trait of interest (`Q_length`) by defining Gene Significance GS as (the absolute value of) the correlation between the gene and the trait.
+For each module, we also define a quantitative measure of module membership (MM) as the correlation of the module eigengene and the gene expression profile.
+This allows us to quantify the similarity of all genes to every module.
+
+### Intramodule analysis
+
+Using the GS and MM measures, we can identify genes that have a high significance for `Q_length` as well as high module membership in interesting modules.
+We plot a scatterplot of Gene Significance vs. Module Membership for all significant modules.
+Don't pay too much attention to the details of this block of code.
+It's nothing more that a very ugly and legacy way of generating a scatterplot.
+This can be done much more cleanly, but we want to be consistent with the WGCNA documentation.
+
+```{r}
+this_trait = "Q_length"
+trait_df = datTraits[, this_trait, drop = F]
+modNames = substring(names(MEs), 3)
+
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+
+geneTraitSignificance = as.data.frame(cor(datExpr, trait_df, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+names(geneTraitSignificance) = paste("GS.", names(trait_df), sep="");
+names(GSPvalue) = paste("p.GS.", names(trait_df), sep="");
+
+module.to.show = moduleTraitPvalue[,this_trait]
+module.to.show = which(module.to.show < 0.05)
+  
+sapply(names(module.to.show), function(this_module){
+
+  this_module = gsub("ME","", this_module)
+  column = match(this_module, modNames);
+  moduleGenes = moduleColors == this_module;
+
+  verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                     abs(geneTraitSignificance[moduleGenes, 1]),
+                     xlab = paste("Module Membership in", this_module, "module"),
+                     ylab = paste0("Gene Significance for ",this_trait),
+                     main = paste("Module membership vs. gene significance\n"),
+                     cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = colorspace::darken(this_module, 0.2))
+  
+}, simplify = F)
+```
+
+These are scatterplots of Gene Significance vs. Module Membership for each module significantly correlated with Q_length.
+We can see that for the 'magenta' module, GS and MM are (somewhat) highly correlated.
+You can play around with the code and visualize those that have a non-significant *p*-values or poor correlations, or see how the same modules correlate with other non-relevant traits.
+
+Genes significantly associated with a trait are often also the most important (central) elements of modules associated with the trait.
+This block will print the top 50 genes associated with the "magenta" module.
+
+```{r}
+names(datExpr)[moduleColors == "magenta"] %>% head(., 50)
+```
+
+### Hubgenes
+
+We have found modules with reasonably high association with our trait of interest, and have identified their central players by the Module Membership measure.
+NOw lets take a look at the so-called "hub genes".
+
+The `signedKME` function will compute the "eigengene-based connectivity", i.e. the module membership of each indivisual gene, and assign it a score.
+
+```{r,warning=FALSE, message=FALSE}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(circlize)
+})
+# We can calculate (signed) eigengene-based connectivity, also known as module membership. Use signedKME for eigengene based connectivity in a single data set.
+datKME = signedKME(
+      datExpr = datExpr,
+      datME = MEs,
+      exprWeights = NULL,
+      MEWeights = NULL,
+      outputColumnName = "kME",
+      corFnc = "cor",
+      corOptions = "use = 'p'")
+
+cols.to.keep = colnames(datKME)
+for (i in 1:length(cols.to.keep)){
+  if (cols.to.keep[i] %in% c('kMEgrey')){
+    cols.to.keep = cols.to.keep[cols.to.keep!= 'kMEgrey']
+  print ("mannually remove kMEgrey")
+  }
+}
+
+datKME$ID <- rownames(datKME)
+lastCol <- ncol(datKME)
+datKME <- datKME[, c(lastCol, 1:lastCol-1)]
+
+```
+
+We'll now select the top 20 genes (`num_top`) per module sorted by kME score and plot a heatmap of the supposedly most informative genes for each module.
+We want to filter out undesirable genes and other junk, so `gene_metadata` is justa data frame of information about each gene that we will use for this purpose.
+We will retain only protein coding genes.
+
+```{r}
+gene_metadata = read.table("data/r3_wgcna_features_metadata.tsv",  sep = "\t", header = T)
+
+num_top = 20
+
+traitHubgeneInfo0 = sapply(names(datKME)[-1], function(kname){
+  df = datKME[, c("ID", kname)]
+  df = df[order(df[[kname]], decreasing = T), ]
+  df = df[df$ID %in% gene_metadata$external_gene_name[gene_metadata$gene_biotype == "protein_coding"], ]
+  return(df)
+}, simplify = F)
+
+gradPal = grDevices::colorRampPalette(RColorBrewer::brewer.pal(n = 7, name = "Reds"))(100)
+col_fun = circlize::colorRamp2(c(0,0.5,1), c(gradPal[1],gradPal[50],gradPal[100]))
+
+sapply(names(traitHubgeneInfo0), function(n){
+  df = head(traitHubgeneInfo0[[n]], num_top)
+  rownames(df) = df$ID
+  df = df[, n, drop = F]
+  colnames(df) = gsub("^kME", "", n)
+  
+  mat = as.matrix(df)
+  draw(Heatmap(mat, width = unit(ncol(mat)*0.5, "cm"), height = unit(nrow(mat)*0.3, "cm"),
+               row_names_gp = gpar(fontsize = 8), column_names_gp = gpar(fontsize = 10),
+               cluster_rows = F, cluster_columns = F,
+               column_title = "", col=col_fun, rect_gp = gpar(col = "black"),
+               show_row_dend = F, row_names_side = "right",
+               heatmap_legend_param = list(title = 'signed kME', direction = "vertical")
+               ))
+  
+}, simplify = F)
+
+```
+
+You might ask what purposea heatmap where all the values are pretty much the same actually serves.
+Truthfully, none, but people will still publish these for some reason.
+What is actually informative are the top genes themselves.
+
+## Compare results to published data
+
+You have now finished running the WGCNA pipeline.
+This part of the tutorial will serve as a validation of sorts.
+
+[Supplementary Table 1](https://www.nature.com/articles/nn.4256#Sec63) of the Langfelder 2016 paper contains differential expression results for their bulk-RNA seq experiments (the same data we ran WGCNA on).
+Load the data and extract only the relevant columns.
+For demonstration, we will compare against the highest Q length results (Q175), which is representative of greatest disease severity.
+
+```{r}
+deg_str_PL = openxlsx::read.xlsx("data/SupplTable_1.xlsx", sheet = "Striatum 6 months")
+deg_str_PL_zQ175 = deg_str_PL[,c(2, 34:39)]
+```
+
+The [EnhancedVolcano](https://bioconductor.org/packages/release/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html) package can be used to generate some very nice volcano plots from DEG results.
+Unfortunately, it has about 10,000 different arguments.
+Don't worry about what these are.
+We chose them to look respectably aesthetic.
+
+```{r}
+library(EnhancedVolcano, warn.conflicts = F)
+
+thresh_pval = 0.05
+thresh_LFC = 0.5
+
+# first of all, let's take a look DEGs for zQ175 vs. Q20
+vp.str.zQ175 <- EnhancedVolcano(deg_str_PL_zQ175,
+                lab = deg_str_PL_zQ175$Symbol,
+                x = 'log2FoldChange.Q.175.vs.20',
+                y = 'FDR.Q.175.vs.20',
+                maxoverlapsConnectors = Inf,
+                pCutoff = thresh_pval,
+                FCcutoff = thresh_LFC,
+                cutoffLineType = 'blank',
+                cutoffLineCol = 'black',
+                cutoffLineWidth = 0,
+                hline = thresh_pval,
+                hlineCol = c('grey0'),
+                hlineType = 'dashed',
+                hlineWidth = 0.8,
+                gridlines.major = TRUE,
+                gridlines.minor = TRUE,
+                xlab = bquote(~Log[2]~ 'FC in striatum of zQ175 vs. Q20 in 6 month'),
+                ylab = bquote(~-Log[10]~italic('FDR')),
+                title = "Striatum DEG in zQ175 vs. Q20",
+                subtitle = NULL,
+                border = 'full',
+                colAlpha = 0.8,
+                legendPosition = 'right',
+                legendLabSize = 10,
+                legendIconSize = 1.0,
+                pointSize = 1, labSize = 3, axisLabSize = 12)
+
+vp.str.zQ175
+```
+
+From kME distribution on each module, we can set threshold for modules that are associated with our trait: We have 'pink', 'magenta', and 'brown' modules that are associated with `Q_length`.
+We're going to see where the module-associated genes land in our volcano plots.
+We basically want to know if they're differential expressed.
+
+First let's look at the kME score distributions for all our modules, but let's look at all of them, not just the significant ones, to illustrate why we care about some but not others.
+Since there are many genes, most uninformative, we'll threshold to those with high kME values.
+We set an reasonable, but arbitrary, threshold of 0.8.
+We'll use this threshold later to determine which genes to visualize.
+
+```{r}
+threshold = 0.8
+lapply(names(traitHubgeneInfo0), function(n){
+  hist(traitHubgeneInfo0[[n]][[2]], main = paste("Histogram of", gsub("kME","",n), "module signed kME"), xlab = "kME", xlim = c(-1,1))
+  abline(v=threshold,col="blue")
+})
+```
+
+We can see that in our significantly associated modules (i.e. magenta, pink, and brown) there is an enrichment for high scoring genes, but there are also many in some other modules.
+The "yellow" module for example has a fair amount.
+Recall this module is associated with sample replicates, and is essentially a "batch-effect" module.
+In the future, we will learn how to correct for inter-sample technical variability.
+There is also the "blue" module which has many high scoring genes, however this module has a *p*-value of 0.2, so this is meaningless.
+
+Let's go back to looking at only our significant polyQ length-associated modules.
+We'll filter out the non-coding genes again and extract only the significant modules.
+
+```{r}
+keep_mods = c("kMEpink","kMEmagenta","kMEbrown")
+datKME.sub = datKME[, keep_mods]
+
+# Genes whose kME is above threshold
+traitHubgeneInfo2 = sapply(names(datKME.sub), function(kname){
+  df = datKME[, c("ID", kname)]
+  df = df[order(df[[kname]], decreasing = T), ]
+  df = df[df$ID %in% gene_metadata$external_gene_name[gene_metadata$gene_biotype == "protein_coding"], ]
+  df = df[which(df[[kname]] >= threshold),]
+  return(df)
+}, simplify = F)
+```
+
+Let's see how many genes in the "pink" and "magenta" modules come up as DEGs in the Langfelder data.
+
+```{r}
+Qlength_Hubgene_pink = traitHubgeneInfo2$kMEpink$ID
+common = intersect(Qlength_Hubgene_pink, deg_str_PL_zQ175$Symbol)
+Qlength_Hubgene_pink_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
+
+Qlength_Hubgene_magenta = traitHubgeneInfo2$kMEmagenta$ID
+common = intersect(Qlength_Hubgene_magenta, deg_str_PL_zQ175$Symbol)
+Qlength_Hubgene_magenta_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
+
+length(Qlength_Hubgene_magenta)
+length(Qlength_Hubgene_pink)
+
+Hubgene_magenta = Qlength_Hubgene_magenta_DE$Symbol
+Hubgene_pink = Qlength_Hubgene_pink_DE$Symbol
+
+intersect(Hubgene_magenta,Hubgene_pink) # no common hubgenes
+```
+
+That's alot.
+Too many in fact.
+We need to filter by log-fold change and *p*-value.
+It's worth noting that our modules don't share any genes.
+
+We'll use the same cutoffs as before and generate a volcano plot.
+Again ignore the implementation.
+I considered wrapping this into a function but figured you may want to play with the plot parameters.
+
+```{r}
+keyvals <- ifelse(
+  deg_str_PL_zQ175$Symbol %in% Hubgene_magenta, 'magenta',
+    ifelse(deg_str_PL_zQ175$Symbol %in% Hubgene_pink, 'pink',
+      'gray'))
+keyvals[is.na(keyvals)] <- 'gray'
+names(keyvals)[keyvals == 'magenta'] <- 'magenta module'
+names(keyvals)[keyvals == 'pink'] <- 'pink module'
+names(keyvals)[keyvals == 'gray'] <- 'neither'
+
+EnhancedVolcano(deg_str_PL_zQ175,
+  lab = deg_str_PL_zQ175$Symbol,
+  x = 'log2FoldChange.Q.175.vs.20',
+  y = 'FDR.Q.175.vs.20',
+  selectLab = c(Hubgene_magenta, Hubgene_pink),
+  xlab = bquote(~Log[2]~ 'fold change'),
+  title = 'Hubgenes of magenta | pink',
+  subtitle = NULL,
+  pCutoff = thresh_pval,
+  FCcutoff = thresh_LFC,
+  maxoverlapsConnectors = Inf,
+  pointSize = 5,
+  labSize = 4,
+  labCol = 'black',
+  boxedLabels = FALSE,
+  shape = 42,
+  colCustom = keyvals,
+  colAlpha = 1,
+  legendPosition = 'right',
+  legendLabSize = 12,
+  legendIconSize = 10,
+  encircle = Hubgene_magenta,
+  encircleCol = 'pink',
+  encircleSize = 2.5,
+  encircleFill = 'magenta',
+  encircleAlpha = 1/2,
+  shade = Hubgene_pink,
+  shadeAlpha = 1/2,
+  shadeFill = 'black',
+  shadeSize = 1,
+  shadeBins = 5,
+  gridlines.major = TRUE,
+  gridlines.minor = FALSE,
+  border = 'full',
+  borderWidth = 1,
+  borderColour = 'black',
+  axisLabSize = 12, titleLabSize = 16)
+```
+
+We color coded the genes by module membership.
+Notice that the "magenta" genes are significantly over represented among down-regulated genes, and most of them are significant.
+In contrast, the "pink" module which had 10 times as many genes shows remarkably little differential enrichment.
+Only a handful of genes are up-regulated with significance.
+So there's something interesting happening among "magenta" genes.
+
+Take a look at the hub genes in this module.
+We'll search for known marker genes of striatal spiny projection neurons (SPN), the most affected cell type in HD, and see if any of them are present inthis module.
+Prior literature suggest that these genes may encompass HD vulnerability factors or have activity that is modulated by Q length.
+
+```{r}
+SPN_marker = c("Adora2a","Arpp21","Bcl11b","Cnr1","Drd1","Drd2","Foxp1","Gpr6","Gpr88","Gpx6","Ido1","Mn1","Pde10a","Pdyn","Penk","Ppp1r1b","Rarb","Rgs9","Rxrg")
+
+Hub_magenta = traitHubgeneInfo2$kMEmagenta
+Hub_magenta_sub = Hub_magenta[which(Hub_magenta$ID %in% SPN_marker),]
+
+length(SPN_marker)
+length(which(Hub_magenta$ID %in% SPN_marker))
+```
+
+17 out of 19 SPN markers are hub genes of the magenta module, with high kME values!
+And given that this is an inexhaustive list, there's likely more.
+This means that expression of SPN marker genes was down-regulated, and this down-regulation is highly correlated with changes in `Q_length`.
+
+## Closing remarks
+
+The purpose of this tutorial was to give you an overview of one of the more popular tools used in transcriptomics.
+As you might have deduced from the awkward code and commentary, the package is quite outdated and some of the methods are obsolete.
+Nevertheless it is a good, early example of using network analysis to examine gene co-expression form RNA-seq data, and a demonstration of how such analysis can provide valuable insight into disease biology.
+Furthermore, if you work in this field, you are very likely to encounter results in literature that were generated using this method and it is helpful to know how to interpret them.
+There are now countless, more modern tools that do similar types of analysis, and a very popular type of analysis it is.
