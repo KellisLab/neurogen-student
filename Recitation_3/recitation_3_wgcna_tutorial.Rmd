@@ -158,7 +158,7 @@ Run this and we'll see how that works.
 # Choose a set of soft-thresholding powers
 powers = c(c(1:10), seq(from = 12, to=20, by=2))
 # Call the network topology analysis function
-sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, blockSize = 750)
 ```
 
 We will use the generated plot to select a candidate exponent based on where the curve appears to saturate.
@@ -215,7 +215,7 @@ cor <- WGCNA::cor
 # Construct the adjacency matrix
 net = blockwiseModules(datExpr, power = 6, corType = "bicor", maxPOutliers =  0.05, 
                         networkType = 'signed hybrid', 
-                        maxBlockSize = 55000, pamRespectsDendro = FALSE)
+                        maxBlockSize = 5000, pamRespectsDendro = FALSE)
 
 # Undo the bug fix.
 cor <- stats::cor
