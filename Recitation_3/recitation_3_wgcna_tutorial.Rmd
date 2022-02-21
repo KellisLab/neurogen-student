@@ -14,7 +14,7 @@ suppressPackageStartupMessages({
   library(WGCNA)
   library(tidyverse)
   library(ggdendro)
-  allowWGCNAThreads(nThreads = BiocParallel::multicoreWorkers())
+  allowWGCNAThreads(2)
 })
 
 dir.create("data", recursive = T, showWarnings = F)
@@ -158,7 +158,7 @@ Run this and we'll see how that works.
 # Choose a set of soft-thresholding powers
 powers = c(c(1:10), seq(from = 12, to=20, by=2))
 # Call the network topology analysis function
-sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, blockSize = 750)
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5, blockSize = 5000)
 ```
 
 We will use the generated plot to select a candidate exponent based on where the curve appears to saturate.
@@ -215,7 +215,7 @@ cor <- WGCNA::cor
 # Construct the adjacency matrix
 net = blockwiseModules(datExpr, power = 6, corType = "bicor", maxPOutliers =  0.05, 
                         networkType = 'signed hybrid', 
-                        maxBlockSize = 5000, pamRespectsDendro = FALSE)
+                        maxBlockSize = 18000, pamRespectsDendro = FALSE, randomSeed = 1)
 
 # Undo the bug fix.
 cor <- stats::cor
@@ -292,7 +292,7 @@ labeledHeatmap(Matrix = moduleTraitCor,
 In the above heatmap, each row corresponds to a module eigengene, column to a trait.
 Each cell contains the corresponding correlation and *p*-value.
 The analysis identifies several significant module--trait associations.
-There's clearly nothing interesting associated with age, and there's some sketchy modules that seems to originate from cross-sample variability (yellow/black).
+There's clearly nothing interesting associated with age, and there's some sketchy modules that seems to originate from cross-sample variability (red/pink).
 The strongest relationships are with polyQ length, as expected.
 We will focus on `Q_length` for the remainder of the tutorial.
 
@@ -345,14 +345,14 @@ sapply(names(module.to.show), function(this_module){
 ```
 
 These are scatterplots of Gene Significance vs. Module Membership for each module significantly correlated with `Q_length`.
-We can see that for the 'magenta' module, GS and MM are (somewhat) highly correlated.
+We can see that for the 'purple' module, GS and MM are (somewhat) highly correlated.
 You can play around with the code and visualize those that have non-significant *p*-values or poor correlations, or see how the same modules correlate with other non-relevant traits.
 
 Genes significantly associated with a trait are often also the most important (central) elements of modules associated with the trait.
-This block will print the top 50 genes associated with the "magenta" module.
+This block will print the top 50 genes associated with the "purple" module.
 
 ```{r}
-names(datExpr)[moduleColors == "magenta"] %>% head(., 50)
+names(datExpr)[moduleColors == "purple"] %>% head(., 50)
 ```
 
 ### Hub genes
@@ -489,7 +489,7 @@ vp.str.zQ175 <- EnhancedVolcano(deg_str_PL_zQ175,
 vp.str.zQ175
 ```
 
-From the kME distribution on each module, we can set threshold for modules that are associated with our trait: We have 'pink', 'magenta', and 'brown' modules that are associated with `Q_length`.
+From the kME distribution on each module, we can set threshold for modules that are associated with our trait: We have 'blue', 'purple', and 'brown' modules that are associated with `Q_length`.
 We're going to see where the module-associated genes land in our volcano plots.
 We basically want to know if they're differential expressed.
 
@@ -502,12 +502,12 @@ We'll use this threshold later to determine which genes to visualize.
 threshold = 0.8
 lapply(names(traitHubgeneInfo0), function(n){
   hist(traitHubgeneInfo0[[n]][[2]], main = paste("Histogram of", gsub("kME","",n), "module signed kME"), xlab = "kME", xlim = c(-1,1))
-  abline(v=threshold,col="blue")
+  abline(v=threshold,col="red")
 })
 ```
 
-We can see that in our significantly associated modules (i.e. magenta, pink, and brown) there is an enrichment for high scoring genes, but there are also many in some other modules.
-The "yellow" module for example has a fair amount.
+We can see that in our significantly associated modules (i.e. purple, blue, and brown) there is an enrichment for high scoring genes, but there are also many in some other modules.
+The "red" module for example has a fair amount.
 Recall this module is associated with sample replicates, and is essentially a "batch-effect" module.
 In the future, we will learn how to correct for inter-sample technical variability.
 There is also the "blue" module which has many high scoring genes, however this module has a *p*-value of 0.2, so this is meaningless.
@@ -516,7 +516,7 @@ Let's go back to looking at only our significant polyQ length-associated modules
 We'll filter out the non-coding genes again and extract only the significant modules.
 
 ```{r}
-keep_mods = c("kMEpink","kMEmagenta","kMEbrown")
+keep_mods = c("kMEblue","kMEpurple","kMEbrown")
 datKME.sub = datKME[, keep_mods]
 
 # Genes whose kME is above threshold
@@ -529,24 +529,24 @@ traitHubgeneInfo2 = sapply(names(datKME.sub), function(kname){
 }, simplify = F)
 ```
 
-Let's see how many genes in the "pink" and "magenta" modules come up as DEGs in the Langfelder data.
+Let's see how many genes in the "blue" and "purple" modules come up as DEGs in the Langfelder data.
 
 ```{r}
-Qlength_Hubgene_pink = traitHubgeneInfo2$kMEpink$ID
-common = intersect(Qlength_Hubgene_pink, deg_str_PL_zQ175$Symbol)
-Qlength_Hubgene_pink_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
+Qlength_Hubgene_blue = traitHubgeneInfo2$kMEblue$ID
+common = intersect(Qlength_Hubgene_blue, deg_str_PL_zQ175$Symbol)
+Qlength_Hubgene_blue_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
 
-Qlength_Hubgene_magenta = traitHubgeneInfo2$kMEmagenta$ID
-common = intersect(Qlength_Hubgene_magenta, deg_str_PL_zQ175$Symbol)
-Qlength_Hubgene_magenta_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
+Qlength_Hubgene_purple = traitHubgeneInfo2$kMEpurple$ID
+common = intersect(Qlength_Hubgene_purple, deg_str_PL_zQ175$Symbol)
+Qlength_Hubgene_purple_DE = deg_str_PL_zQ175[deg_str_PL_zQ175$Symbol %in% common,]
 
-length(Qlength_Hubgene_magenta)
-length(Qlength_Hubgene_pink)
+length(Qlength_Hubgene_purple)
+length(Qlength_Hubgene_blue)
 
-Hubgene_magenta = Qlength_Hubgene_magenta_DE$Symbol
-Hubgene_pink = Qlength_Hubgene_pink_DE$Symbol
+Hubgene_purple = Qlength_Hubgene_purple_DE$Symbol
+Hubgene_blue = Qlength_Hubgene_blue_DE$Symbol
 
-intersect(Hubgene_magenta,Hubgene_pink) # no common hubgenes
+intersect(Hubgene_purple,Hubgene_blue) # no common hubgenes
 ```
 
 That's alot.
@@ -560,21 +560,21 @@ I considered wrapping this into a function but figured you may want to play with
 
 ```{r}
 keyvals <- ifelse(
-  deg_str_PL_zQ175$Symbol %in% Hubgene_magenta, 'magenta',
-    ifelse(deg_str_PL_zQ175$Symbol %in% Hubgene_pink, 'pink',
+  deg_str_PL_zQ175$Symbol %in% Hubgene_purple, 'purple',
+    ifelse(deg_str_PL_zQ175$Symbol %in% Hubgene_blue, 'blue',
       'gray'))
 keyvals[is.na(keyvals)] <- 'gray'
-names(keyvals)[keyvals == 'magenta'] <- 'magenta module'
-names(keyvals)[keyvals == 'pink'] <- 'pink module'
+names(keyvals)[keyvals == 'purple'] <- 'purple module'
+names(keyvals)[keyvals == 'blue'] <- 'blue module'
 names(keyvals)[keyvals == 'gray'] <- 'neither'
 
 EnhancedVolcano(deg_str_PL_zQ175,
   lab = deg_str_PL_zQ175$Symbol,
   x = 'log2FoldChange.Q.175.vs.20',
   y = 'FDR.Q.175.vs.20',
-  selectLab = c(Hubgene_magenta, Hubgene_pink),
+  selectLab = c(Hubgene_purple, Hubgene_blue),
   xlab = bquote(~Log[2]~ 'fold change'),
-  title = 'Hubgenes of magenta | pink',
+  title = 'Hubgenes of purple | blue',
   subtitle = NULL,
   pCutoff = thresh_pval,
   FCcutoff = thresh_LFC,
@@ -589,12 +589,12 @@ EnhancedVolcano(deg_str_PL_zQ175,
   legendPosition = 'right',
   legendLabSize = 12,
   legendIconSize = 10,
-  encircle = Hubgene_magenta,
-  encircleCol = 'pink',
+  encircle = Hubgene_purple,
+  encircleCol = 'blue',
   encircleSize = 2.5,
-  encircleFill = 'magenta',
+  encircleFill = 'purple',
   encircleAlpha = 1/2,
-  shade = Hubgene_pink,
+  shade = Hubgene_blue,
   shadeAlpha = 1/2,
   shadeFill = 'black',
   shadeSize = 1,
@@ -608,10 +608,10 @@ EnhancedVolcano(deg_str_PL_zQ175,
 ```
 
 We color-coded the genes by module membership.
-Notice that the "magenta" genes are significantly over represented among down-regulated genes, and most of them are significant.
-In contrast, the "pink" module which had 10 times as many genes shows remarkably little differential enrichment.
+Notice that the "purple" genes are significantly over represented among down-regulated genes, and most of them are significant.
+In contrast, the "blue" module which had 10 times as many genes shows remarkably little differential enrichment.
 Only a handful of genes are up-regulated with significance.
-So there's something interesting happening among "magenta" genes.
+So there's something interesting happening among "purple" genes.
 
 Take a look at the hub genes in this module.
 We'll search for known marker genes of striatal spiny projection neurons (SPNs), the most affected cell type in HD, and see if any of them are present in this module.
@@ -620,14 +620,14 @@ Prior literature suggest that these genes may encompass HD vulnerability factors
 ```{r}
 SPN_marker = c("Adora2a","Arpp21","Bcl11b","Cnr1","Drd1","Drd2","Foxp1","Gpr6","Gpr88","Gpx6","Ido1","Mn1","Pde10a","Pdyn","Penk","Ppp1r1b","Rarb","Rgs9","Rxrg")
 
-Hub_magenta = traitHubgeneInfo2$kMEmagenta
-Hub_magenta_sub = Hub_magenta[which(Hub_magenta$ID %in% SPN_marker),]
+Hub_purple = traitHubgeneInfo2$kMEpurple
+Hub_purple_sub = Hub_purple[which(Hub_purple$ID %in% SPN_marker),]
 
 length(SPN_marker)
-length(which(Hub_magenta$ID %in% SPN_marker))
+length(which(Hub_purple$ID %in% SPN_marker))
 ```
 
-17 out of 19 SPN markers are hub genes of the magenta module, with high kME values!
+17 out of 19 SPN markers are hub genes of the purple module, with high kME values!
 And given that this is an inexhaustive list, there's likely more.
 This means that expression of SPN marker genes was down-regulated, and this down-regulation is highly correlated with changes in `Q_length`.
 
