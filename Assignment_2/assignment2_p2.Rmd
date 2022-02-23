@@ -4,6 +4,8 @@ title: "Problem Set 2 - Differential expression analysis and gene set enrichment
 
 **If you have not done so already, click on the gear icon to the right of the "knit" button and select "Use Visual Editor" (or press *Ctrl/Cmd+Shift+F4* ) to render the markdown in this document.**
 
+**Disclaimer: I kept reusing the same variable names across chunks, so try to run things in order.**
+
 In this problem set we'll introduce the topics of differential expression and gene set enrichment analysis. We will work with cell type-specific TRAP-seq data from several mouse models published in [Lee et al. (2020)](https://www.cell.com/neuron/pdf/S0896-6273(20)30475-X.pdf).
 
 Start by loading the necessary libraries. We also provided a convenient function to normalize count matrices so that you don't have to do it manually this time.
@@ -37,13 +39,13 @@ normalize.matrix <- function(S, log_transform = FALSE) {
 
 # Differential expression analysis and variance correction
 
-We say a gene is differentially **expressed** when it's expression level (i.e. the quantity of the gene's RNA in a cell) deviates from the expected amount. We say that a gene is **up-regulated** when it's expression is higher than expected, and **down-regulated** when the converse occurs. Either way, we can say that the gene is **dysregulated**. We already discussed the very basics of differential expression analysis in Problem Set 1, but to recap, it's essentially just computing the difference between the observed and expected expression and assigning it a **p**-value that tell us how confident we are that the expression level actually changed by the amount we calculated. We're going to do this again, but in a much fancier and robust way, using several of the tools we discussed in lecture and a few others.
+We say that a gene is **differentially expressed** when it's expression level (i.e. the quantity of RNA molecules in a cell) deviates from the expected amount. We say that a gene is **up-regulated** when it's expression is higher than expected, and **down-regulated** when the converse occurs. Either way, we can say that the gene is **dysregulated**. We already discussed the very basics of differential expression 3analysis in Problem Set 1, but to recap, it's essentially just computing the difference between the observed and expected expression and assigning it a *p*-value that tell us how confident we are that the expression level actually changed by the amount we calculated. We're going to do this again, but in a much fancier and robust way, using several of the tools we discussed in lecture, and a few others.
 
 For this part, we will work exclusively with TRAP-seq data. If you skipped over the suggested reading, [*Translating ribosome affinity purification* (TRAP)](https://www.cell.com/fulltext/S0092-8674(08)01365-2) is a tool that allows us tag the ribosomes of a genetically-defined cell population with GFP and pull down ribosome-bound mRNA transcripts, from which we can generate a sequencing library. The result is a high-depth library that contains only the actively-translated genes from a very well-defined cell population of our choice. For this assignment, we will analyze TRAP libraries from several different cell types and mouse models.
 
 ## Data preprocessing and quality control
 
-We will start by loading a TRAP-seq data set of indirect pathway spiny projection neurons (iSPN) from 8 mice. This data set contains raw counts from 4 male R6/2 mice at 12 weeks of age and 4 male wild-type controls from the same litter. Setting `row.names = 1` extracts the first column of the data and sets it as the row names when importing into a data frame.
+We will start by loading a TRAP-seq data set of counts from indirect pathway spiny projection neurons (iSPNs) of 8 mice. This data set contains raw counts from 4 male R6/2 mice at 12 weeks of age, and 4 male wild-type controls from the same litter. Setting `row.names = 1` extracts the first column of the data and sets it as the row names when importing into a data frame.
 
 ```{r}
 cts = read.table("data/counts_R62_D2_TRAP.tsv", header = T, sep = "\t", row.names = 1)
@@ -58,14 +60,12 @@ As usual, we need to first preprocess our counts. In the chunk below, write a fe
 The functions `rowVars()` and `quantile()` may be useful here. Remember that your counts are currently in a data frame and need to be converted to a matrix before doing anything. Assign the filtered count matrix to `cts_fil`. Make sure to retain the column and row names.
 
 ```{r}
-cts_fil = cts[Matrix::rowSums(cts) > 0, ] %>% as.matrix()
-rv = rowVars(cts_fil)
-cts_fil = cts_fil[rv > quantile(rv, probs = 0.1), ]
+cts_fil = ... ## Fill this in
 ```
 
 Normally we'd perform variance filtering after normalizing the counts, but we will use the unnormalized counts later, so for simplicity we'll do it now. In truth, it makes very little difference.
 
-Evaluate this line to make sure your row/colnames are correct. If this doesn't evaluate to `TRUE` fix your code in the chuck above, otherwise the remaining chunks will not run properly.
+Evaluate this line to make sure your row/column names are correct. If this doesn't evaluate to `TRUE` fix your code in the chuck above, otherwise the remaining chunks will not run properly.
 
 ```{r}
 all(rownames(cts_fil) %in% rownames(cts)) && all(colnames(cts_fil) == colnames(cts_fil))
@@ -84,7 +84,7 @@ We need to include in this table both our variable of interest (in this case the
 
 Our mice are all the same age and gender, they were harvested in the same batch, and the TRAP tagging was done on the same cell type. So the only relevant variable is genotype.
 
-> Variables can be continuous (e.g. age) or categorical (e.g sex). Categoricals to be compared are stored as factors and have levels. Levels are all the possible unique values (categories) that the variable can take. Sometimes the order of some or all of the levels can matter. In this case, the only level whose order matters is the *reference* level, that is, the level that all others will be compared against. For use this is the wild-type or control genotype (CTRL). The reference level must always comes first.
+> Variables can be continuous (e.g. age) or categorical (e.g sex). Categoricals to be compared are stored as factors and have levels. Levels are all the possible unique values (categories) that the variable can take. Sometimes the order of some or all of the levels can matter. In this case, the only level whose order matters is the *reference* level, that is, the level that all others will be compared against. For us, this is the wild-type or control genotype (CTRL). The reference level must always comes first.
 
 Here we convert the `Genotype` column to a factor and set the levels in the appropriate order. When printing factors, all valid levels are shown in the order which they are ranked.
 
@@ -106,11 +106,11 @@ pca_out = prcomp(t(cts_norm), center = T, scale. = T)
 autoplot(pca_out, data = sample_metadata, colour = "Genotype")
 ```
 
-Our samples should separate very well by genotype. There might be a minor outlier among the R6/2s, but it should have negligible effect on our results.
+Our samples should separate very well by genotype. There might be a minor outlier among the R6/2s, but it should have a negligible effect on our results.
 
 ## Calling differentially expressed genes
 
-Now we will use the [*DESeq2*](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8) package to call differentially expressed genes (DEGs). First we'll put our data in the necessary format. In the chunk below we construct an object containing our counts, the sample metadata, and we'll also specify a design formula. *DESeq2* takes unnormalized counts, so we will pass `cts_fil` to `countData`. The variables in our formula will be taken from the data frame passed to `colData`. We can also pass a design matrix to `design` directly. Since we care to only compare across genotypes, our formula is simply `~ Genotype`.
+Now we will use the [*DESeq2*](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8) package to call differentially expressed genes (DEGs). First we'll put our data in the necessary format. In the chunk below we construct an object containing our counts, the sample metadata, and we'll also specify a design formula. *DESeq2* takes unnormalized counts, so we will pass `cts_fil` to `countData`. The variables in our design formula will be taken from the data frame passed to `colData`. We can also pass a design matrix to `design` directly. Since we care to only compare across genotypes, our formula is simply `~ Genotype`.
 
 ```{r}
 dds <- DESeqDataSetFromMatrix(countData = cts_fil,
@@ -125,17 +125,17 @@ dds <- DESeq(dds)
 resultsNames(dds)
 ```
 
-We don't care for the fit corresponding to the intercept, only that corresponding to our genotypes. Let's extract that set of results and convert it to a data frame for inspection.
+We don't care for the fit corresponding to the intercept, only that corresponding to our genotype. Let's extract that set of results and convert it to a data frame for inspection.
 
 ```{r}
 res_dds <- results(dds,  name = "Genotype_R62_vs_CTRL")
 res_dds = data.frame(Gene = rownames(res_dds), res_dds)
-print(res_dds)
+head(res_dds, 10)
 ```
 
-If there were more variables in our design, there would be additional results corresponding to the models fitted to those variables. For each set of results *DESeq2* generates a table whose content depends on several parameters. Running with defaults gives us the mean, normalized expression across all samples (`baseMean`), the log2 fold-change (`log2FoldChange`), the standard error of the fold-change (`lfcSE`), the Wald statistic (`stat`), the self-explanatory `pvalue` , and the adjusted p-value (`padj`). By default, the p-value is adjusted using the [Benjamini--Hochberg procedure](https://en.wikipedia.org/wiki/False_discovery_rate#Benjamini%E2%80%93Hochberg_procedure).
+If there were more variables in our design, there would be additional results corresponding to the models fitted to those variables. For each set of results, *DESeq2* generates a table whose content depends on several parameters. Running with defaults gives us the mean, normalized expression across all samples (`baseMean`), the log2 fold-change (`log2FoldChange`), the standard error of the fold-change (`lfcSE`), the Wald statistic (`stat`), the self-explanatory `pvalue` , and the adjusted *p*-value (`padj`). By default, the *p*-value is adjusted using the [Benjamini--Hochberg procedure](https://en.wikipedia.org/wiki/False_discovery_rate#Benjamini%E2%80%93Hochberg_procedure).
 
-As you might have deduced, *DESeq2* performs the [Wald test](https://en.wikipedia.org/wiki/Wald_test) for determining statistical significance, in contrast to the *t*-test we used in Problem Set 1. Also unlike in Pset 1, this algorithm fits a negative binomial model to the data instead of a linear one.
+As you might have deduced, *DESeq2* performs the [Wald test](https://en.wikipedia.org/wiki/Wald_test) for determining statistical significance, in contrast to the *t*-test we used in Problem Set 1. Also unlike in Pset 1, this algorithm fits a [negative binomial](https://en.wikipedia.org/wiki/Negative_binomial_distribution) model to the data instead of a linear one.
 
 Inspect the results, we'll sort by adjusted *p*-value and get the fold-change of our 20 most significant genes.
 
@@ -153,7 +153,7 @@ res_dds[order(res_dds$log2FoldChange), c("Gene", "log2FoldChange")] %>% head(., 
 
 Either at the every top, or very close to that, there should also be a gene, *Gpx6*. Following the original generation of this data, that gene came up as the most down-regulated gene across several mouse models using this very same analysis workflow shown here, so we performed the obvious follow-up experiment, Turns out that if you restore the expression level of *Gpx6*, [it alleviates the effects of mutant Huntingtin](https://www.pnas.org/content/112/1/268.short).
 
-Let's do the same thing again, but a little differently. There are many different approaches to determining differential expression. As mentioned, the *DESeq2* differs from what we did before in that it fits a negative binomial model to unnormalized data, and uses Wald's test for significance testing. Is this a better approach that the very simple an manual approach from Problem Set 1? Not really. In fact, let's go back to that.
+Let's do the same thing again, but a little differently. There are many different approaches to determining differential expression. As mentioned, *DESeq2* differs from what we did before in that it fits a negative binomial model to unnormalized data, and uses Wald's test for significance testing. Is this a better approach that the very simple an manual approach from Problem Set 1? Not really. In fact, let's go back to that.
 
 We will repeat our analysis using the *limma* package. *limma* fits a linear model to pre-normalized counts, and determines significance by *t*-test, pretty much exactly as we did before with a few extra steps to identify outliers.
 
@@ -188,7 +188,7 @@ Let's plot the fold-changes and Pearson's correlation.
 cor_lfc = cor(res_dds$log2FoldChange, res_limma$logFC, method = "p", use = "complete.obs")
 ggplot() + geom_point(aes(x = res_dds$log2FoldChange, res_limma$logFC)) +
   labs(title = sprintf("Pearson's: %0.2f", cor_lfc),
-       x = "LCF DESeq2", y = "LFC limma")
+       x = "LFC DESeq2", y = "LFC limma")
 ```
 
 Not great. What about Spearman's correlation?
@@ -199,9 +199,9 @@ cor(res_dds$log2FoldChange, res_limma$logFC, method = "s")
 
 Much better. This method computes the correlation of the ranks of the values instead of the values themselves, which is a much better measure. So the rank of the fold-changes is similar across methods, but the fold-changes themselves seem to differ. This warrants some commentary about comparing DEG results.
 
-It may surprise you to learn that fold-change is a meaningless value, as is any measure of gene expression. It's magnitude depends entirely on how the data looks to begin with and how it's processed. Normalized or unnormalized, median-scaled, constant scales, or unscaled, low sequencing depth or high. The absolute value of expression for a given gene can only be compared against other values within the same set of results that were preprocessed the same way and fit to the same model. It is entirely relative. It should be no surprise that two different methods that take as input counts in different formats, and fit them to different types of models will spit out magnitudes on different scales.
+It may surprise you to learn that fold-change is a meaningless value, as is any such measure of gene expression. It's magnitude depends entirely on how the data looks to begin with and how it's processed. Normalized or unnormalized, median-scaled, constant scale, or unscaled, low sequencing depth or high. The absolute value of expression for a given gene can only be compared against other values within the same set of results that were preprocessed the same way and fit to the same model. It is entirely relative. It should be no surprise that two different methods that take as input counts in different formats, and fit them to different types of models, will spit out magnitudes on different scales. For this reason, some people prefer to report expression changes as Z-scores instead.
 
-A better approach to comparing them is compare the test statistics. In this case, the Wald and *t* statistics generated by each method.
+A better approach when comparing them is compare the test statistics. In this case, the Wald and *t* statistics generated by each method.
 
 ```{r}
 cor_p = cor(res_dds$stat, res_limma$t, method = "p", use = "complete.obs")
@@ -220,15 +220,15 @@ At the end of the day, the choice of a DEG approach is entirely a matter of pref
 
 Next we'll take a look at how we deal with unwanted variance.
 
-When do do differential expression analysis, or any analysis where we're comparing between groups in the presence of additional variables, we want to ensure that the effect and size the effect that we observe originates solely from the difference between our groups of interest.
+When we do differential expression analysis, or any analysis where we're comparing between groups in the presence of additional variables, we want to ensure that the effect and the magnitude of the effect that we observe originates solely from the difference between our groups of interest.
 
 For example, say I'm comparing gene expression between healthy and sick samples. My control group has equal numbers of male and female samples, but my disease group has more males than females. What would we see? Well there would most likely be a fair number of X and Y chromosome genes among our significant DEGs, because in fact they would be statistically enriched in opposite directions. Knowing that these gene alterations might have been driven by the sample sex bias, could we not just remove them from our results? Sex differences are prevalent across many diseases, and some of these dysregulated genes may be real and relevant, so that would not be a wise idea. So must we go back and repeat our experiment with gender-balanced cohorts? That would be nice, but if we're sufficiently powered in terms of phenotype and sex, and the interaction of both, then we don't need to. We just have to incorporate sex into our design and have our model fitted to account for sex-specific variation. By doing this we can regress out the effect of sex on gene expression and get only the effect driven by phenotype, and as an added bonus, we would also get the DEGs driven solely by sex by regressing out the phenotype effect.
 
-> As a word of caution, we don't just want to add every known covariates in our sample metadata to the design to account for all possible unwanted effects. We need to take care to only include covariates that we know have a strong effect, and that said effect is orthogonal to the one driven by our variables of interest. Otherwise, we risk erasing real signal. We won't go into detail on how to chose the appropriate design or how to determine which variables to include or exclude, as an entire book can be written on the topic and these considerations vary dramatically from experiment to experiment.
+> As a word of caution, we don't just want to add every known covariate to the design to account for all possible unwanted effects. We need to take care to only include covariates that we know have a strong effect, and that said effect is orthogonal to the one driven by our variables of interest. Otherwise, we risk erasing real signal. We won't go into detail on how to chose the appropriate design or how to determine which variables to include or exclude, as an entire book can be written on the topic and these considerations vary dramatically from experiment to experiment.
 
 Let's say you've done your due diligence on your data, gathered all the metadata you could find, accounted for every known batch effect, tested for correlations between PCs and covariates, even consulted with a statistician, and you still have some nasty looking PCA plots that clearly suggest that a large source of variation is present in your data. Let's look at an example of this with real data.
 
-The dataset that will be used here contains TRAP-seq data from 48 male HD model mice of the same genetic strain split into 5 experimental groups. The mice in these groups differ only in the length of the CAG repeat in the mutant *Htt* knock-in allele. This data was generated with the goal of finding genes whose expression correlates with mutation size. The mutant CAG repeat tracts are of length 20 (control), 50, 111, 170, and 175. We'll import the counts and generate a metadata table as before. The counts are already filtered and normalized.
+The data set that will be used here contains TRAP-seq data from 48 male HD model mice of the same genetic strain split into 5 experimental groups. The mice in these groups differ only in the length of the CAG repeat in the mutant *Htt* knock-in allele. This data was generated with the goal of finding genes whose expression correlates with mutation size. The mutant CAG repeat tracts are of length 20 (control), 50, 111, 170, and 175. We'll import the counts and generate a metadata table as before. The counts are already filtered and normalized.
 
 ```{r}
 cts_norm = read.table("data/counts_allelic_D2_TRAP_fil.tsv", header = T, sep = "\t", row.names = 1) %>% as.matrix()
@@ -255,18 +255,17 @@ Our mice are all the same age, sex and strain, the largest PC doesn't alight wit
 
 There's a few different strategies for dealing with unknown variance, one of the more popular ones ins [*surrogate variable analysis*](https://journals.plos.org/plosgenetics/article?id=10.1371/journal.pgen.0030161). You can think of a **surrogate variable** as a component that explains a substantial amount of variance that is not explained by any known or modeled covariate. We will use the [*sva*](https://bioconductor.org/packages/release/bioc/html/sva.html) package to identify these surrogate variables and remove them from out data.
 
-We start by constructing design matrix that contains the covariates that we know and care about, and whose contribution should not be removed from the data. In this case, that is only `Q_length`. We will then call `sva()`, passing it our counts and the design matrix, along with a null model, which is just the intercept.
+We start by constructing design matrix that contains the covariates that we know of and care about, and whose contribution should not be removed from the data. In this case, that is only `Q_length`. We will then call `sva()`, passing it our counts and the design matrix, along with a null model, which is just the intercept.
 
 ```{r}
 mod =  model.matrix(~ Q_length, data = sample_metadata)
 mod0 =  model.matrix(~ 1, data = sample_metadata)
 sva.obj = sva(cts_norm, mod = mod, mod0 = mod0)
-paste("# of SV's:", sva.obj$n.sv)
 ```
 
 The output is a list containing the matrix of identified surrogate variables and the posterior probabilities, which we don't need here.
 
-> There's apparently 14 surrogate variables identified by the algorithm, which is quite a lot. In good practice, we would compute the correlation between all our covariates and surrogate variables, and keep only the uncorrelated ones, to ensure that we weren't accidentally removing real signal
+> There's apparently 14 surrogate variables identified by the algorithm, which is quite a lot. In good practice, we would compute the correlation between all our covariates and surrogate variables, and keep only the uncorrelated ones, to ensure that we aren't accidentally removing real signal.
 
 Now we'll use `removeBatchEffect()` from the limma package (or any one of dozens of functions that does exactly the same thing). We will pass it the counts, the surrogate variable, and the design matrices. The output is a corrected counts matrix that has had the contribution of the surrogate variables removed. Then we'll visualize it with PCA again.
 
@@ -277,7 +276,7 @@ pca_out = prcomp(t(cts_sva), center = T, scale. = T)
 autoplot(pca_out, data = sample_metadata, colour = "Q_length")
 ```
 
-That looks much better. Q20 and Q50 are still slightly intermixed, but there's an actual biological reason for this. Whatever the threshold for toxicity in this mouse model is, it's between 50 and 11 CAG repeats. We can now pass `cts_sva` to our favorite differential expression analysis package to get DEGs whose expression is a function of `Q_length`.
+That looks much better. Q20 and Q50 are still slightly intermixed, but there's an actual biological reason for this. Whatever the threshold for toxicity in this mouse model is, it's between 50 and 111 CAG repeats. We can now pass `cts_sva` to our favorite differential expression analysis package to get DEGs whose expression is a function of `Q_length`.
 
 But we won't do that yet, you will do it later.
 
@@ -287,7 +286,7 @@ But we won't do that yet, you will do it later.
 
 Once we have DEGs, we want to put them in context. A single dysregulated gene by itself may be interesting, sure, but that's not usually the case.
 
-Whatever molecule is encoded by a gene, whether protein-coding or otherwise, just go out and do everything on it's own. It can act upon other molecules, be acted upon, or work in conjunction with other molecules in the cell. The collection of these molecules interacting with one another to perform some biological function is called a [**pathway**](https://en.wikipedia.org/wiki/Biological_pathway). When we identify genes that are dysregulated, we would like to know the implications of misregulation, so we may ask questions such as:
+Whatever molecule is encoded by a gene, whether protein-coding or otherwise, doesn't just go out and do everything on it's own. It can act upon other molecules, be acted upon, or work in conjunction with other molecules in the cell. The collection of these molecules interacting with one another to perform some biological function is called a [**pathway**](https://en.wikipedia.org/wiki/Biological_pathway). When we identify genes that are dysregulated, we would like to know the implications of misregulation, so we may ask questions such as:
 
 -   What biological processes does this molecules partake in?
 
@@ -295,15 +294,17 @@ Whatever molecule is encoded by a gene, whether protein-coding or otherwise, jus
 
 -   Do the misregulated genes interact with one another?
 
--   What processes may be disrupted by the regulations of these genes?
+-   What processes may be disrupted by the dysregulation of these genes?
 
 Gene set enrichment analysis can help us answer these questions, and it's often the first thing we do after identifying DEGs.
 
-The idea of a pathway is often hard to define, and the term is generally misused to refer to any arbitrary but related collection of genes. We have some very well-defined canonical pathways such as the [Wnt signaling pathway](https://en.wikipedia.org/wiki/Wnt_signaling_pathway), but we can also have an arbitrarily defined "ALS pathway" that might refer to the collection of genes know to be mutated or misregulated in [amyotrophic lateral sclerosis](https://en.wikipedia.org/wiki/Amyotrophic_lateral_sclerosis). We can define a pathway however way we want as any set of genes that we care about, and for which we have reason to believe that they may interact or be otherwise similarly affected by a higher process.
+The idea of a pathway is often hard to define, and the term is generally misused to refer to any arbitrary, but related, collection of genes. We have some very well-defined canonical pathways such as the [Wnt signaling pathway](https://en.wikipedia.org/wiki/Wnt_signaling_pathway), but we can also have an arbitrarily defined "ALS pathway" that might refer to the collection of genes known to be mutated or misregulated in [amyotrophic lateral sclerosis](https://en.wikipedia.org/wiki/Amyotrophic_lateral_sclerosis). We can define a pathway however way we want as any set of genes that we care about, and for which we have reason to believe that they may interact or be otherwise similarly affected by a higher process.
 
-There are dozens of databases of "curated" lists of pathways, some much better than others. There possibly hundreds of different algorithms and packages that do some variation of this analysis as well. In essence, pathway enrichment analysis is the act of looking for over-representation (enrichment) of a set of (likely differentially expressed) genes in a pathway (list of genes).
+There are dozens of databases of "curated" lists of pathways, some much better than others. There's possibly hundreds of different algorithms and packages that do some variation of this analysis as well. In essence, pathway enrichment analysis is the act of looking for over-representation (enrichment) of a set of (likely differentially expressed) genes in another list of genes (pathway).
 
-The simplest (and most common) way of doing this is to compute the overlap between two sets of genes (e.g. the DEGs and the members of the pathway) and perform and enrichment test such as Fisher's exact test. We'll load the DEG results from running *DESeq2* on on the iSPN TRAP-seq data and extract only the genes that have $\text{abs}(LFC) > 1$ and $p_{\text{adj}} < 0.1$. And because *DESeq2* loves to spit out `NA` for genes it doesn't like, we'll remove those as well.
+The simplest (and most common) way of doing this is to compute the overlap between two sets of genes (e.g. the DEGs and the members of the pathway) and perform an enrichment test such as [Fisher's exact test](https://en.wikipedia.org/wiki/Fisher%27s_exact_test).
+
+We'll load the DEG results from running *DESeq2* on on the iSPN TRAP-seq data and extract only the genes that have $\text{abs}(LFC) > 1$ and $p_{\text{adj}} < 0.1$. And because *DESeq2* loves to spit out `NA` for genes it doesn't like, we'll remove those as well.
 
 ```{r}
 res_dds = read.table("data/DEG_R62_D2_TRAP.tsv", sep = "\t", header = T)
@@ -317,14 +318,14 @@ The result is \~1700 genes classified as differential expressed, which is quite 
 pathways_kegg = readRDS("data/kegg_pathways_list.rds")
 ```
 
-`pathways_kegg` is a named list, where each sub-list is named after a pathway, and the contents of that lists contain the pathway's member genes. Now this particular database contains human pathways and human genes, not mouse, but this is just an example and they're pretty well conserved. For purposes of demonstration, we're going to be lazy and just capitalize our mouse gene names (Don't actually do this in real analysis. Use a mouse database.).
+`pathways_kegg` is a named list, where each sub-list is named after a pathway, and the contents of that lists contain the pathway's member genes. Now this particular database contains human pathways and human genes, not mouse, but this is just an example and they're pretty well conserved. For purposes of demonstration, we're going to be lazy and just capitalize our mouse gene names. (Don't actually do this in real analysis. Use a mouse database.)
 
 ```{r}
 head(pathways_kegg$`Wnt signaling pathway`)
 head(pathways_kegg$`Amyotrophic lateral sclerosis (ALS)`)
 ```
 
-Now we'll iterate over the list and compute the p-value of the enrichment of our DEGs in each pathway using the hypergeometric test, which is just the one-tailed version of Fisher's exact test. We will do this with `phyper()`. Since our DEGs contain only protein-coding genes, our population size will be rough estimate of the number of protein-coding genes in the mouse genome.
+Now we'll iterate over the list and compute the *p*-value of the enrichment of our DEGs in each pathway using the hypergeometric test, which is just the one-tailed version of Fisher's exact test. We will do this with `phyper()`. Since our DEGs contain only protein-coding genes, our population size will be a rough estimate of the number of protein-coding genes in the mouse genome.
 
 ```{r}
 p_pty = sapply(pathways_kegg, function(pathway){
@@ -336,7 +337,7 @@ p_pty = sapply(pathways_kegg, function(pathway){
 })
 ```
 
-`p_pty` is now a named vector, where the names are the pathways and the values are the *p*-values of the "enrichment" of our DEGs in the respective pathways. Let's convert our result into an easier to visualize format and sort by smallest *p*-value.
+`p_pty` is now a named vector, where the names are the pathways and the values are the *p*-values of the "enrichment" of our DEGs in the respective pathway. Let's convert our result into an easier to visualize format and sort by smallest *p*-value.
 
 ```{r}
 p_pty_df = data.frame(pvalue = p_pty)
@@ -347,7 +348,7 @@ Our DEGs seems to be over-represented in pathways corresponding to different typ
 
 ## The easy way
 
-Let's look at how we might do this with a package. We will use the popular [*gprofiler2*](https://biit.cs.ut.ee/gprofiler/gost) package for pathway analysis. We will pass out DEGs and a few metadata parameters to the `gost()` function. We will ask it to return on the statistically significant pathways with our arbitrarily chosen and arbitrarily FDR (false discovery rate) corrected *p*-value of 0.05. By default, *gprofiler2* querys a bunch of common pathway databases. We will ask it to only look at KEGG for comparison.
+Let's look at how we might do this with a package. We will use the popular [*gprofiler2*](https://biit.cs.ut.ee/gprofiler/gost) package for pathway analysis. We will pass our DEGs and a few metadata parameters to the `gost()` function. We will ask it to return only the statistically significant pathways defined by the arbitrarily chosen and arbitrarily FDR (false discovery rate) corrected *p*-value of 0.05. By default, *gprofiler2* querys a bunch of common pathway databases. We will ask it to look only at KEGG for comparison.
 
 ```{r}
 res_gost = gost(query = genes_sig, organism = "mmusculus",
@@ -366,9 +367,9 @@ The result is very similar. The *p*-values differ slightly because they are corr
 
 ## The caveats
 
-The idea of looking at overlaps between arbitrarily thresholded and arbitrarily defined sets of genes and computing enrichment based on an arbitrarily defined population size can seem... unscientific... because it is. The DEGs at the top of the list are given equal weight to those that are right tat the cutoff. Furthermore, this type of statistical test, which is the most commonly used in the literature, has the major flaw of being dependent on the population size. The larger the population size, the smaller the *p*-value, always. Clearly, this a broken approach.
+The idea of looking at overlaps between arbitrarily thresholded and arbitrarily defined sets of genes and computing enrichment based on an arbitrarily defined population size can seem... unscientific... because it is. The DEGs at the top of the list are given equal weight to those that are right at the cutoff. Furthermore, this type of statistical test, which is the most commonly used in the literature, has the major flaw of being dependent on the population size. The larger the population size, the smaller the *p*-value, always. Clearly, this a broken approach.
 
-Nevertheless, it illustrates the purpose of the analysis. We want to know how our perturbed genes relate to one another and if the changes we observer that a function biological effect. However, there are more systematic and rigorous ways of doing this type of analysis. There are tools such as [*GSEA*](https://www.gsea-msigdb.org/gsea/index.jsp) that consider the distribution and ranking of genes when determining enrichment, although the issue of hand-curated, and arbitrarily defined collections of genes found in these databases, which *GSEA* will compare against, still persists.
+Nevertheless, it illustrates the purpose of the analysis. We want to know how our perturbed genes relate to one another and if the changes we observe have a functional biological effect. However, there are more systematic and rigorous ways of doing this type of analysis. There are tools such as [*GSEA*](https://www.gsea-msigdb.org/gsea/index.jsp) that consider the distribution and ranking of genes when determining enrichment, although the issue of hand-curated, and arbitrarily defined collections of genes found in these databases, which *GSEA* will compare against, still persists.
 
 # The homework problems
 
@@ -376,7 +377,7 @@ This is the do-it-yourself part. For this problem set you will solve two differe
 
 ## Problem 1: Identifying cell types by differential marker expression
 
-Imagine this nightmarish scenario: You work in a molecular neurobiology lab and had planned to profile a series of mouse TRAP lines, each encoding for a different striatal cell type. Your terribly incompetent collaborator extracted RNA and constructed sequencing libraries from these mice and lost the track of which library came from which line. In fact, they don't even know what all lines they sequenced. As far as you know, they just started grabbing mice at random and didn't want to admit it. But at least it appears that each batch cam from the same cage, so the mice from each batch were from the same line (probably). Mice are expensive, reagents are expensive, and sequencing is expensive, but most importantly, you're out of mice, and if you don't salvage the data, you're not graduating this year.
+Imagine this nightmarish scenario: You work in a molecular neurobiology lab and had planned to profile a series of mouse TRAP lines, each encoding for a different striatal cell type. Your terribly incompetent collaborator extracted RNA and constructed sequencing libraries from these mice and lost the track of which library came from which line. In fact, they don't even know what all lines they sequenced. As far as you know, they just started grabbing mice at random and didn't want to admit it. But at least it appears that each batch came from the same cage, so the mice from each batch were from the same line (probably). Mice are expensive, reagents are expensive, and sequencing is expensive, but most importantly, you're out of mice, and if you don't salvage the data, you're not graduating this year.
 
 The data you are provided with contains unprocessed counts from 38 mice across 4 unknown TRAP lines, labeled CT1, CT2, CT3, and CT4, with 8-10 replicates for each line. You know that all the data comes from healthy mice of the same age.
 
@@ -386,9 +387,9 @@ Some information that may help you get started:
 
 -   We usually define **marker genes** are genes that distinguish one cell type from another. These genes are typically highly expressed and unique. A marker gene for a certain cell type will appear to be highly up-regulated when when compared against a different cell type.
 
--   You may find one of the papers assignment in Part 1 to be extremely useful to solving this problem.
+-   You may find one of the papers assignment in Part 1 to be extremely useful to solving this problem. All 4 are striatal cell types.
 
--   It doesn't matter what cell type you chose as the reference. The results will differ, but it will not make it any easier or harder to identify any one the cell types.
+-   It doesn't matter what cell type you chose as the reference. The results will differ, but it will not make it any easier or harder to identify any one cell types.
 
 Here is the data:
 
@@ -440,3 +441,7 @@ Name some genes you found in your analysis.
     Some Q length-dependent genes are:
 
 Justify your methodology:
+
+# Submitting
+
+Knit your completed notebook into an HTML or PDF file and submit to the link on Canvas.
