@@ -1,0 +1,609 @@
+---
+title: "Problem Set 3 - Part 2: Single cell data analysis tutorial."
+---
+
+**If you have not done so already, click on the gear icon to the right of the "knit" button and select "Use Visual Editor" (or press *Ctrl/Cmd+Shift+F4* ) to render the markdown in this document.**
+
+In this Problem Set we'll introduce a basic workflow for single cell data analysis. We will make use of the data and tools published in [this paper](https://ars.els-cdn.com/content/image/1-s2.0-S089662732030475X-mmc4.pdf) that you had to critique for Part 1.
+
+This part of the Problem Set is a tutorial with no associated problems. You will be expected to apply the techniques demonstrated here to the homework problem posed in Part 3.
+
+Start by loading the necessary libraries and downloading the necessary data.
+
+```{r}
+suppressPackageStartupMessages({
+  library(ACTIONet, warn.conflicts = F)
+  library(dplyr, warn.conflicts = F)
+  library(ggpubr)
+  library(umap)
+  library(presto)
+  library(limma)
+})
+
+# dir.create("data", recursive = T, showWarnings = F)
+# system("gsutil -m cp -r gs://neurogen-spring22-data/Assignment3/* data/")
+```
+
+# Background
+
+As we discussed in lecture, single-cell sequencing is a family of methods that allows us to construct sequencing libraries where each RNA or DNA molecule has a label indicating the cell from which it originated, and thus we can group all molecules with the same label to create a library corresponding to a single cell. There are dozens of single-cell modalities that allow varying degrees of throughput and resolution. On one end of the spectrum, we have techniques such as the popular droplet-base RNA sequencing (which we will use). This method gives us high level gene counts for thousands of genes across thousands or millions of cells, but is unable to capture any information about different isoforms or sequence variations, is limited to only capturing polyadenilated transcripts up to a certain length, and is very noisy. On the other extreme, we may be interested in only sequencing a handful of cells, but for those few we could get full length transcripts at single nucleotide resolution, or even do whole genome sequencing.
+
+The analysis of the data encoded by these single cell libraries, whether it be gene expression, chromatin accessibility, motif binding, whole genome etc., is no different than their bulk counterparts. The difference, like with any assay, lies is in how we encode, decode, and preprocess the data.
+
+With the exception of very low-throughput methods, such as those in which we would sort individual cells into wells, most single-cell assays rely on some molecular barcoding scheme. A barcode is nothing more than a DNA sequence that is attached to one end of the molecule of interest and used, for example, to uniquely identify the molecule or indicate what batch of samples it came from. The most common scheme for high throughput assays is feature barcoding, which involves some combination of a [*unique molecular identifier (UMI)*](https://dnatech.genomecenter.ucdavis.edu/faqs/what-are-umis-and-why-are-they-used-in-high-throughput-sequencing/) and a cellular barcode.
+
+![](data/figs/10x_barcoding.png)
+
+A UMI is a random (but not really) sequence attached to a molecule that is used to uniquely identify it. As trivial as it may sound, recall that nearly all sequencing library construction methods rely on amplification. This means that every molecule is going to be copied many times. Undoubtedly, you will end up sequencing multiple copies of the same molecule, and to make matters worse some molecules will amplify more and sequence better than others depending on their nucleotide sequence and length. The old way of dealing with this issue was using normalization approaches such as reads per kilobase million (RPKM) and the like, whereby you would normalize your read counts according to the length of the transcript or region that the sequence came from. By incorporating a UMI into our reads we can simply throw out all duplicates of the same barcode and ensure that each unique molecule is counted only once. UMI barcoding, while most often used in single cell assays, can work for most any library, and can (and is) used in bulk assays as well.
+
+The cellular barcode is more self explanatory. Many copies of this barcode are usually attached to a capture bead that captures a single cell. When the cell is lysed, all molecules that came from this one cell will be tagged with this barcode, and the barcode is of course unique to each bead and therefore each cell. UMIs can be recycled if the cellular barcodes are distinct, since the molecule will be identified and sorted according to the unique combination of the two.
+
+However, not all molecules can be trivially barcoded, nor are all common sequencing technologies amenable to barcoding, so while common, barcoding is not ubiquitous.
+
+As mentioned, single cell data can come in many forms. We will focus on high throughput droplet-based assays which are the most common. The data generated by this type of assay is primarily feature counts. This type of assay captures thousands of individual cells in water droplets and tags each molecule (feature) with a UMI and cellular barcode. Since we are interested in capturing thousands of features across thousands or millions of cells, we usually resort to high-throughput sequencing of the resulting libraries. In doing so, we are limited to sequencing only several dozen bases from one end of each molecule. This is sufficient to map pretty much any sequence to any genome with confidence, but not much more. This means that for an RNA library we get little to no information regarding the isoform sequenced or genetic variation. So in for RNA sequencing, the output of the assay is a table of integers indicating how many times a gene was observed in a cell, irrespective of its splice variant or processing state. This is what we will use as input for our analysis.
+
+## Data preprocessing
+
+The basic workflow for analyzing single-cell feature-barcode data consists of four basic steps:
+
+1.  Alignment
+
+2.  Cleaning
+
+3.  Clustering
+
+4.  Annotation
+
+We will actually start from Step 3, but it's worth discussing the first two.
+
+Step 1 is identical to bulk assays with the exception of having to remove the barcodes before alignment. We use the exact same tools we use for bulk (e.g. [STAR](https://github.com/alexdobin/STAR) for RNA or [BWA](https://github.com/lh3/bwa) for DNA) with some trivial pre- or post-processing steps to sort the reads by cell.
+
+Step 2 is the most cumbersome and difficult, and the one most papers mess up. High throughout single-cell data is incredibly noisy littered with artefacts. This step involves removing all "cells" and features that are not real, have more than one cell, are damaged, or contaminated. I put "cells" in quotes because all droplets are sequenced with equal probability regardless of whether or not they actually contain a cell. For these assays to work properly, the capture efficiency of a droplet is kept at \<1% to maximize the probability of capturing at most one cell per droplet. If the experiment is conducted properly and the samples is of good quality, the resulting UMI vs. cell distribution will look like a sharp elbow where the first inflection denotes the boundary between droplets with cells and those without. When it doesn't look like this, we have a problem.
+
+![](data/figs/good_v_bad_elbow.png)
+
+This figure is an idealized situation comparing libraries generated from a very clean cell culture versus a very degraded chunk of human brain tissue. Usually you will see something in between, in which case selecting a threshold for determining what is and isn't a cell is a bit arbitrary.
+
+Once you have determined, either manually or algorithmically, which UMIs and cell barcodes you will retain, you are left with a table of feature-by-cell counts enriched for candidate cells. Still not all of them will be cells, and certainly not all will be usable. From this truncated set we have to manually and painstakingly do tremendous amounts of exploratory analysis to identify what is real signal and what is contamination, and whether or not the data is suitable for analysis at all or if the experiment has to be repeated. Due to the traumatic nature of the assay, which can very easily damage the cells, it is not uncommon to have eliminated well over 50% of the real signal from this truncated set prior to continuing because the cells are too noisy to analyze.
+
+Because the cleaning process varies dramatically depending on the type of assay, the experimental design, and the sample, there is no straight forward or template approach for this process (and if anyone tells you there is, they're lying). It is a laborious, interactive, and iterative process where many of the details for each unique experiment are left to personal preference. Any attempt to demonstrate a "general" this process will be misleading, hence we will skip this step and start from the clean data.
+
+# Analysis of a single sample
+
+## Dimensionality reduction and visualization
+
+For this part of the tutorial, we will work with a single, complete, and already curated single nucleus RNA-seq data set from a healthy 6 month-old mouse striatum. You already used a subset of this data for Problem Set 1. This is also one of the control samples used in the assigned paper.
+
+This tutorial is broken down into three sections, with the relevant data for each stored in separate directories. At the beginning of each section we will clear the work space and set the directory for the relevant data. Start by setting the path for this section.
+
+```{r}
+rm(list = ls()); invisible(gc()); # Clear workspace
+data_path = "data/p1_bl6"
+```
+
+Now we will load the full feature-barcode matrix and associated gene and cell metadata. Since the counts matrix is large, but consists mostly of 0's, it is stored and will be loaded in sparse format. We will work almost exclusively in this format going forward. Th metadata are tab-separated tables that we will load as data frames.
+
+```{r}
+cts = readMM(file = file.path(data_path, "counts.mtx"))
+sample_metadata = read.table(file.path(data_path, "sample_data.tsv"), header = T, sep = "\t")
+feature_metadata = read.table(file.path(data_path, "feature_data.tsv"), header = T, sep = "\t")
+
+colnames(cts) = sample_metadata$Barcode
+rownames(cts) = feature_metadata$Gene
+cts = as(cts, "dgCMatrix") # Counts should almost always be in CSC format.
+```
+
+Let's start by doing things the old fashioned way and see what does and doesn't work. In the past we removed all zero genes and then filtered low-variance genes. The latter is dangerous to do here. Consider the following: our data represents a sampling of (ideally) all (but usually only some) cell types in the striatum. The features that will distinguish one cell type from another are selectively expressed in that cell type. So if we have a population that comprises, say, 1% of the cells in this brain region, what happens if we filter all low variance genes or remove features that aren't present in 10% or 20% of our data? Surely we will lose the ability to distinguish these cells and they will instead be misclassified as something else. Instead, we will conservatively filter features that are non-zero in a very tiny fraction of our population.
+
+```{r}
+# Remove genes not present in at least 1% of cells.
+cts_norm = cts[rowSums(cts > 0) > 0.01*NCOL(cts), ]
+NROW(cts)
+NROW(cts_norm)
+```
+
+Although we set a very low threshold, we still managed to eliminate half of our features.
+
+Now we will normalize as before. This method still works just fine. The `normalize.matrix()` performs the same median-scaled library size normalization we've always used, and then log-transforms the counts.
+
+```{r}
+cts_norm = normalize.matrix(cts_norm, log_transform = T, scale_param = median)
+```
+
+Now we will do PCA and plot the first 2 PCs and see what happens.
+
+> `prcomp()` is the standard function for PCA in R. However, it's unbelievably slow compared to the Python one, and will be even slower with sparse input, so we will use a C implementation that we wrote which gives identical results in just a few seconds. Going forward, we will only use the first 50 components, which is more than we need, so we will compute *only* the first 50 to speed things up.
+
+```{r}
+pca_out = decomp.PCA(t(cts_norm), k = 50, max_iter = 100, return_raw = TRUE)
+colnames(pca_out$x) = paste0("PC", 1:NCOL(pca_out$x))
+
+ggplot(data=cbind(pca_out$x[, 1:2], sample_metadata),
+       aes(x=PC1,
+           y=PC2,
+           color=CellLabel))+
+  geom_point(size=0.5)+
+  ggtitle("PCA: PC1 vs PC2") +
+  theme_bw(10)
+
+```
+
+There's some separation I suppose, but according to the `CellLabel` column of our metadata, there should be (at least) 16 distinct cell types, but we can only see 6 or 7 badly-smeared clusters. Indeed, compare this to Figure 4b of the paper. They look nothing alike.
+
+So our data is clearly too complex and high-dimensional for PCA visualization to be of any use. What more can we do? Well there is a whole family of algorithms designed for the purpose of visualizing such data. You may have heard of [*t-distributed stochastic neighbor embedding (t-SNE)*](https://en.wikipedia.org/wiki/T-distributed_stochastic_neighbor_embedding). This was the first such algorithm to do this particularly well on this type of data and was the standard for high-dimensional data visualization for a long time. 15 years have passed since this algorithm was published and it's now considered obsolete, as it has inspired much faster and flexible algorithms that do a better job at preserving spatial information. The current state of the art in genomics data visualization is [Uniform Manifold Approximation and Projection (UMAP)](https://github.com/lmcinnes/umap) and it's countless derivatives. We will now try the vanilla implementation of this algorithm and see how it works compared to PCA.
+
+We should note that although PCA is not useful for visualization, we will still use it. Most visualization algorithms work best when fed a reduced representation as input. We will give UMAP the first 50 principal components and allow it generate a 2D representation of the data from that.
+
+> UMAP itself is also a general dimensional reduction algorithm, meaning that it doesn't need a reduced input to work, it will produce one on it's own. However, given that it's designed for visualization and takes advantage of randomization, it does not do as good of a job at preserving the true structure of the data or the inter-sample variance compared to PCA.
+
+```{r}
+set.seed(0) # Ensure UMAP output is reproducible
+umap_out = umap(pca_out$x[, 1:50])
+colnames(umap_out$layout) = paste0("UMAP", 1:NCOL(umap_out$layout))
+
+umap_data = cbind(umap_out$layout[, 1:2], sample_metadata)
+ggplot(data=umap_data,
+       aes(x=UMAP1,
+           y=UMAP2,
+           color=CellLabel))+
+  geom_point(size=0.5)+
+  ggtitle("UMAP")+
+  theme_bw(10)
+```
+
+As we can see, this is a significantly better visualization. Already we can see most of the cell types in our data clearly.
+
+> The default implementation will of `umap()` will target 2 components, which is ideal given that we want to visualize our data in two dimensions. If we wanted to visualize in higher dimensions, or use it for general dimensionality reduction, we would adjust the function parameters accordingly.
+
+Now that we have a semi-decent visualization, let's try to see what cell types are present. We will plot the expression of a few key marker genes as a gradient on top of the UMAP plot.
+
+```{r}
+genes = c("Drd2", "Clu", "Mbp", "Adarb2")
+gene_exp = as.matrix(cts_norm[genes, ])
+
+lapply(rownames(gene_exp), function(n){
+  logUMI = gene_exp[n, ]
+  p <- ggplot(cbind(logUMI, umap_data)) + 
+    geom_point(
+      aes(x=UMAP1,
+          y=UMAP2,
+          color=logUMI),
+      size = 0.25,
+      show.legend = F) +
+    viridis::scale_color_viridis(option="magma") + 
+  ggtitle(n)+
+  theme_bw(10)
+}) %>% ggpubr::ggarrange(plotlist = ., ncol = 2, nrow = 2)
+```
+
+We can clearly see where the iSPNs (*Drd2*), astrocytes (*Clu*), oligodendrocytes (*Mbp*) and *Adarb2*+ interneurons are on the plot.
+
+## Clustering and annotation
+
+Now let's get a little fancy. One of the most useful and informative ways of looking at single cell data is through network analysis. That is, treating the cells as nodes in a network and applying graph-theoretic analytic approaches. This comes in handy when trying to cluster and annotate cells. There are many ways of generating a network from an assortment of data points. In fact, UMAP already does this internally.
+
+In order to identify which cells should be placed near each other, UMAP first constructs a network to identify "hubs" where similar nodes (cells) group together, and it's ideal for demonstration because the algorithm that it uses is none other than the simple [*k*-nearest neighbors (*k*-NN)](https://en.wikipedia.org/wiki/K-nearest_neighbors_algorithm) algorithm that we learned about and used in Problem Set 1. The default implementation does *k*-NN with 15 neighbors. To determine how similar each data point is in the graph, it assigns as the weight of each edge the distance between the two connected nodes. By default, this is just the [Euclidean distance](https://en.wikipedia.org/wiki/Euclidean_distance#:~:text=In%20mathematics%2C%20the%20Euclidean%20distance,being%20called%20the%20Pythagorean%20distance.) between the vectors.
+
+The index of each cell's neighbors and the distance (weights) are also stored in the output of the `umap()` function, so we can easily construct the [adjacency matrix](https://en.wikipedia.org/wiki/Adjacency_matrix#:~:text=In%20graph%20theory%20and%20computer,with%20zeros%20on%20its%20diagonal.) of this network. In this case, the adjacency matrix is a square matrix that is non-zero everywhere that there is an edge between two nodes, and the non-zero value is the weight.
+
+```{r}
+knn_out = umap_out$knn$indexes # Matrix of neighbor indices
+i_idx = rep(c(1:NROW(knn_out)), 15)
+j_idx = c(knn_out)
+
+umap_graph = sparseMatrix(i = i_idx, j = j_idx, x = c(umap_out$knn$distances))
+```
+
+Now that we have our network in matrix form, we can apply any of the countless network clustering algorithms to find informative groupings in our data. One very popular clustering algorithm is [Leiden](https://www.nature.com/articles/s41598-019-41695-z). Leiden clusters a network by connectivity, meaning that it looks for groups of cells that have many short connections between them, making it suitable for clustering our *k*-NN-generated network.
+
+The `cluster.graph()` function takes and adjacency matrix and a resolution parameter and returns a vector of labels corresponding to the clusters generated by Leiden.
+
+```{r}
+leiden_umap = cluster.graph(umap_graph, resolution_parameter = 0.4)
+```
+
+The resolution parameter is a positive value that determines the number of partitions (clusters) based on the data. The higher the number, the more clusters it will find. The number of clusters is dependent on the structure of the data and using the same resolution parameters on two different data sets will usually return different numbers of clusters.
+
+> As we discussed in Problem Set 1, there are countless clustering algorithms, all aimed at identifying different groups of features based on a variety of metrics. If you are working with single cell data for your project, we encourage you to try many of them and see what works best for your intended analysis.
+
+Let's plot the clusters.
+
+```{r}
+ggplot(data=data.frame(Cluster = as.character(leiden_umap), umap_data),
+       aes(x=UMAP1,
+           y=UMAP2,
+           color=Cluster))+
+  geom_point(size=0.5)+
+  ggtitle("Leiden Cluster")+
+  theme_bw(10)
+```
+
+Leiden partitioned our data into 13 clusters. Since we already know how many cell types we have and what clusters they correspond to, we can see right off the bat that some cell types are under partitioned and some are over partitioned, and even a few are mis-clustered.
+
+Clustering is an exploratory technique, so we do not expect to an algorithm to identify all populations immediately, or even correctly. For instance, we may apply Leiden with a small resolution parameter to give us broad groupings, and then subset a cluster and further resolve it with a larger parameter. Also, it's important to understand that this or any other clustering algorithm does not know the identity of the nodes. It may cluster cells based on similarities that have nothing to do with our desired labels, such as cell with abnormally high or low sequencing depth or cells with ambient contamination, or any other feature that is inadvertently captured by the underlying network structure.
+
+We will make our lives easier by converting our raw data into something more usable. There are many packages in R and Python that offer data structures specifically for dealing with genomic data, including some that are designed for single-cell. The most popular data structure for genomics data in R is the [SummarizedExperiment](https://bioconductor.org/packages/release/bioc/vignettes/SummarizedExperiment/inst/doc/SummarizedExperiment.html) object. This object is composed of one or more matrices of same size originating from the same data (e.g. raw counts and log counts) stored in a list of assays. In addition, the object stores a set of data frames containing metadata along each dimension.
+
+![](data/figs/summarizedexperiment.png)
+
+This object is generic and can be used to store any genomic data that can be encoded as a set of numeric matrices, and as such there are derivatives for specific assays. We will use two of these derivatives. One popular one for single cell data is the `SingleCellExperiment` class. It is identical to a `SummarizedExperiment` object in every way with the exception of having an additional slot to store reduced representations of the data.
+
+Let's convert the data to `SingleCellExperiment`.
+
+```{r}
+sce = SingleCellExperiment(
+  assays = list(logcounts = cts_norm),
+  colData = sample_metadata,
+  rowData = feature_metadata[feature_metadata$Gene %in% rownames(cts_norm), ]
+  )
+
+show(sce)
+```
+
+Now that we have all of our data conveniently stored into a single object and we can easily add to it. Let's add the Leiden cluster labels as a column of the cell metadata, as well as the PCA and UMAP reductions.
+
+```{r}
+sce$leiden = leiden_umap
+reducedDims(sce)$PCA = pca_out$x
+reducedDims(sce)$UMAP = umap_out$layout
+show(sce)
+```
+
+We can now subset the object as if it were a matrix and it will subset all the metadata tables and reduced representations accordingly.
+
+```{r}
+sce_sub = sce[, sce$leiden == 1]
+
+scater::plotUMAP(sce_sub, colour_by = "leiden")
+```
+
+We will use this object to do some more exploratory analysis. Now that we have a UMAP representation and we have clustered it by Leiden, we'll see if any of these clusters contain oligodendrocytes. We'll plot a heatmap of oligodendrocyte marker gene expression across clusters.
+
+```{r}
+genes_olig = c("Mbp", "Mobp", "St18", "Plp1", "Qk")
+scater::plotGroupedHeatmap(sce, features = genes_olig, group = "leiden", exprs_values = "logcounts")
+```
+
+It looks like cluster 3 is a likely candidate, but we can be more rigorous. We'll do some statistical analysis to get a ranking of all genes across clusters. Recall that in Problem Set 1 we tried using the Wilcoxon Rank-Sum test for differential expression, but we did not have enough observations to get valid statistics. Well now we do. We will run Wilcoxon across all Leiden clusters to identify the top genes for each. The `wilcoxauc()` function will perform the statistical test for each cluster by comparing the mean gene expression within each cluster versus the mean expression across every cell outside of that cluster (background expression).
+
+```{r}
+markers.wilcox = wilcoxauc(sce, group_by = "leiden", assay = "logcounts")
+markers.wilcox = split(markers.wilcox, markers.wilcox$group)
+wilcox_markers_3 = markers.wilcox$`3` %>% .[order(.[["auc"]], decreasing = T), ]
+
+head(wilcox_markers_3, 10)
+```
+
+Given the top genes when sorting by [AUC](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve), we can say with confidence that cluster 3 contains our oligodendrocytes.
+
+We can do some variation of this analysis to annotate every population in our data set.
+
+## Advanced approaches
+
+Let's look at an example of doing this type of analysis, starting from the raw data, with more sophisticated tools. We will used the package that used to analyze the snRNA-seq data in the assigned paper.
+
+> Full disclosure: We wrote this package, and while it works very well, it's not terribly well documented. If you're doing a single-cell project, we encourage you to explore the many R and Python packages available and determine which works best for your needs.
+
+We will again load our data into an easy to manipulate object. The `ACTIONetExperiment` object is another derivative of `SummarizedExperiment`. It contains all the same slots as well as equivalents of the additional ones included in `SingleCellExperiment` and a few more for storing network representations.
+
+> We wrote this because there was no equivalent to the [AnnData](https://anndata.readthedocs.io/en/latest/) object used in Python, making cross platform analysis extremely difficult. This package, in conjunction with Anndata, can trivially import and export single-cell data between R and Python.
+
+```{r}
+ace = ACTIONetExperiment(assays = list(counts = cts),
+                   rowData = feature_metadata,
+                   colData = sample_metadata)
+```
+
+We will now do the exact same type of filtering (removing all genes not present in at least 1% of cells) and normalization, but at the object level.
+
+```{r}
+ace = filter.ace(ace, min_cells_per_feat = 0.01)
+ace = normalize.ace(ace)
+show(ace)
+```
+
+Run the following chunk and plot the output. Afterwards we will explain how it works.
+
+> Although this algorithm is multithreaded, it uses random initialization at various points. Manually setting the seed and setting `thread_no = 1`
+>
+> that the output is identical every time. Neither is necessary and it will run much slower, but it's to ensure that the text in this tutorial matches the output in the figures.
+
+```{r}
+ace = reduce.ace(ace)
+ace = runACTIONet(ace, thread_no = 1)
+
+plot.ACTIONet(ace, label_attr = "CellLabel")
+```
+
+The first line (`reduce.ace()`) performs dimensionality reduction. It does SVD followed by orthoprojecting out the background gene expression, thus "amplifying" the informative cell type specific signal. Alone it doesn't accomplish much, but minimizes the [propagation of error](https://en.wikipedia.org/wiki/Propagation_of_uncertainty) in subsequent steps. You can run the cell bellow to compare this versus regular PCA. For the first 2 components, there is little difference.
+
+```{r}
+# Normal PCA
+plot_pca = plot.ACTIONet(pca_out$x[, 1:2], label_attr = sample_metadata$CellLabel) + ggtitle("PCA")
+
+# Orthonormalized (w.r.t background) SVD
+plot_action = plot.ACTIONet(ace$ACTION, label_attr = ace$CellLabel) + ggtitle("SVD + Orthoprojection")
+
+ggpubr::ggarrange(plot_pca, plot_action)
+```
+
+`runACTION()` internally performs the following steps:
+
+1.  Performs [archetypal analysis (AA)](https://en.wikipedia.org/wiki/Archetypal_analysis) decomposition on the reduced input across a range $[k_{\min}, k_{\max}]$ of $k$ values in search of $k$ archetypes. You can think of an archetype as an extreme data point (actually the most extreme). The biological justification of doing AA is that evolution has driven cell types to be non-redundant and so the points of the data that represent our distinct cell types will be those furthest apart from each other. As an added bonus, it also captures true outliers.
+2.  After identifying the `sum(k_min:k_max)` most extreme data points, all other cells can be represented as a linear combination of these points ([convex combination](https://en.wikipedia.org/wiki/Convex_combination)), generating a new type of reduced representation.
+3.  This reduction is used to construct a network using a more sophisticated version of the *k*-NN algorithm using the [Jensen-Shannon distance (JSD)](https://en.wikipedia.org/wiki/Jensen%E2%80%93Shannon_divergence) between cells as the weight of the edges. JSD measures the similarity of two distributions (e.g. gene expression) and so it's a better metric than the Euclidean distance.
+4.  At the same time, each cell is fuzzily assigned to the nearest archetype to generate a clustering. Clusters that are trivial (containing one cell) or unreproducible are pruned, and those that are very similar and combined.
+5.  The network from (4) is used as the input to a modified variant of UMAP that generates a [force directed layout](https://en.wikipedia.org/wiki/Force-directed_graph_drawing). Making better use of space in the visualization . Note that vanilla UMAP left alot of empty space, but the space between the clusters is meaningless, and does not correspond to the similarity between clusters.
+6.  Gives an enrichment score for each feature to each cell and cluster, so that we can easily identify marker genes.
+
+Now most of these steps can be done independently or with plug-and-play parameters and inputs. you can try seeing what happens when, for example, you use a different reduction or network as input to the various steps, use different metrics for generating the network, or use a different visualization algorithm on the output. Both with this algorithm, and others, the possibilities for data decomposition and analysis are endless.
+
+Let's go back to the idea of network analysis. What more can we do when we encode our data as a graph? How about predict gene expression? Since single-cell data is so sparse, many of our cells will have missing data, which is especially problematic when the missing data corresponds to something like a marker gene. Let's plot the gene expression of our four markers again. These are the same values as in the original UMAP but now superimposed on the ACTIONet layout.
+
+```{r}
+visualize.markers(ace, markers = genes, alpha = 0, single_plot = T) + ggtitle("Raw Expression")
+```
+
+For these particular genes it's not too bad, but you can see that there is sparsity in expression. Also, *Clu* seems to have non-specific, basal expression in other clusters. We can use [PageRank](https://en.wikipedia.org/wiki/PageRank) (yes the web page ranking algorithm) to "diffuse" expression over the network and gives us expression values wherever they might be missing or correct those that don't make sense given each cells neighbors. Setting alpha to a non-zero value performs PageRank imputation.
+
+```{r}
+visualize.markers(ace, markers = genes, alpha = 0.9, single_plot = T) + ggtitle("PageRank Imputation")
+```
+
+We can see this is much cleaner and less sparse. There are many imputation algorithms out there, including some that employ supervised learning to impute and correct gene expression.
+
+Let's now run Leiden clustering on this network. `leiden.clustering()` is just a wrapper for the same function we used before
+
+```{r}
+ace$leiden = leiden.clustering(ace, resolution_parameter = 0.4, postprocess = F)
+plot.ACTIONet(ace, label_attr = ace$leiden) + ggtitle("Leiden")
+```
+
+Pretty good. Cluster 5 makes sense because it actually corresponds to a subtype of 1 and 2 in which the two sub-clusters are more similar to each other than to 1 or 2. Increasing the resolution parameter will further partition these.
+
+What about the archetype clustering we talked about?
+
+```{r}
+plot.ACTIONet(ace, label_attr = ace$assigned_archetype) + ggtitle("Assigned Archetype")
+```
+
+This looks quite different. In fact, most clusters don't correspond to the visible clustering or to any particular cell type. That's because the two clustering methods capture different information. We use both, and other algorithms, when analyzing single cell data. Archetypal clustering is better at finding groupings associated with variance and thus is more useful when cleaning and curating the data, whereas Leiden finds groupings more likely to be based on identity, making it better for annotation.
+
+Now we can combine the network with the feature enrichment from step 5 to very quickly and accurately identify marker genes. Let's get the markers for each cluster.
+
+```{r}
+action.markers = findMarkers.ACTIONet(ace, cluster_attr = "leiden", top_genes = 10, features_use = "Gene")
+head(action.markers, 10)
+```
+
+Feel free to write some lines (totally optional) comparing the marker genes for each group to those found via simple pairwise statistical tests such as Wilcoxon. You will see that for a number of cell types (neurons in particular), the top genes here are much more specific because it uses the network-imputed expression across highly similar groups of cells instead of the sparse counts across individual cells.
+
+Here we visualize the markers again for cluster 3 to show that this method is quite accurate.
+
+```{r}
+visualize.markers(ace, markers = action.markers$X3[1:9], single_plot = T, features_use = "Gene", alpha = 0.9)
+```
+
+Lastly, we can use the archetypal clustering, the network, and the feature enrichment to do automated cell type annotation. Load this very minimal set of marker genes.
+
+```{r}
+markers_str = readRDS(file.path(data_path, "markers_str.rds"))
+markers_str[1:5]
+```
+
+Now we will pass this list to `annotateCells()` along with the object to perform automated annotation.
+
+```{r}
+annots = annotateCells(ace, markers = markers_str)
+plot.ACTIONet(ace, label_attr = annots$Label, trans_attr = annots$Confidence)
+```
+
+The transparency corresponds to the confidence of the label for that cell. This methods annotates each cell individually and assigns it a score, but we could also perform a similar type of automated annotation on entire clusters generated by an algorithm of our choosing. There are many ways to annotate cells.
+
+Be aware that there is much work involved in first identifying good markers that are sufficiently specific. Feeding low quality markers to the algorithm will cause it to spit out non-sense labels. This also assumes that you know the identity of all the cell types *a priori*. This list does not contain markers for every cell type in this data set, which is why some entire small clusters are almost transparent. In the worst case, those cells will be misclassified. However, the more genes given as markers for each cell type, assuming they are high quality, the more accurate the labels will be.
+
+While this seems nice and fast, it is still the case that manual annotation is the best way to go. Automated annotation works only if the data is of exceptional quality, assumes that you know all the labels before hand, assumes that you have high quality markers for all the labels, and that there is little variability across samples if you're analyzing more than one at a time. However, such a method might be a good first pass. And before you ask about supervised annotation approaches, the current state of the art still performs quite poorly in comparison, as single-cell data is still far too noisy and variable for one model to work reliably across data sets.
+
+# Analysis of multiple samples
+
+## Batch correction
+
+As with any genomics data, when we combine data sets we must deal with technical variability introduced by variations in the experimental set up and execution. For example, doing the experiment in multiple batches, having different batches of the experiment performed by different people, sequencing on different machines or flow cells, or obtaining tissue from different sources. We refer to the variance introduced by these actions as *batch effects.*
+
+We learned how to deal with some of these effects in the case of differential expression analysis, and those methods still apply for single cell differential expression, but how will batch effects affect the analysis we did above? Alas, these effects will confound all of them, leading to erroneous visualization, clustering, and annotation. Let's take a look at a particularly ugly example.
+
+Let's clear the work space and load a new data set.
+
+```{r}
+rm(list = ls()); invisible(gc()); # Clear workspace
+data_path = "data/p2_spn"
+se = readRDS(file.path(data_path, "se_spn_ctrl_subsampled.rds"))
+show(se)
+```
+
+Here we have a `SummarizedExperiment` object containing 9 single cell data sets from human striatal spiny projection neurons. Since we have only two cell types we can filter our genes more liberally.
+
+```{r}
+se = filter.ace(se, min_cells_per_feat = 0.1)
+se = normalize.ace(se)
+```
+
+We will run the vanilla ACTIONet pipeline saving our reduced representation to the named reduction slot of the object. We will use multithreading here to speed up the process buy omitting the thread parameter. Then we will plot and label our data by sample.
+
+```{r}
+ace_nocorr = reduce.ace(se, reduction_slot = "no_corr")
+ace_nocorr = runACTIONet(ace_nocorr, layout_compactness = 100, reduction_slot = "no_corr")
+plot.ACTIONet(ace_nocorr, ace_nocorr$Batch) + ggtitle("Batch")
+```
+
+Something is very clearly wrong here. Our samples do not overlap despite being from the same cell population.
+
+There are many different approaches to correcting batch effects. We will explore two here.
+
+The first is correction via *mutual nearest neighbors (MNN)*. MNN is just *k*-NN with the added constraint that we only consider two nodes to be neighbors if both of them have each other among their *k*-nearest neighbors.
+
+![](data/figs/scanorama.png)
+
+In the MNN batch correction scheme, we search for neighbors across batches, rather than within. We select one batch to be the reference batch and drag all other batches together on top of it so that the nearest neighbors of each cell across batches overlap. This method has the tendency to over-correct, but generally works extremely well. The caveat is that it's very slow and incredibly memory inefficient. Let's try one implementation called fastMNN (ironically it's incredibly slow, even among MNN algorithms) from the `batchelor` package.
+
+`reduce.and.batch.correct.ace.fastMNN()` is simply a wrapper around fastMNN that simplifies the setup into a single line. We will name the corrected reduction generated by fastMNN as `mnn` and use it as input for `runACTIONet()`.
+
+```{r}
+ace_mnn = reduce.and.batch.correct.ace.fastMNN(se, batch_attr = "Batch", reduction_slot = "mnn")
+ace_mnn = runACTIONet(ace_mnn, layout_compactness = 100, reduction_slot = "mnn")
+
+mnn_batch = plot.ACTIONet(ace_mnn, ace_mnn$Batch) + ggtitle("Batch MNN")
+mnn_type = plot.ACTIONet(ace_mnn, ace_mnn$SubType) + ggtitle("Cell Type")
+ggpubr::ggarrange(mnn_batch, mnn_type)
+```
+
+This is much better.
+
+Another approach (disclosure again, this is our method) is to regress out the batch effect. in this approach we construct a design matrix containing our suspected batch variables and we identify the components of each sample that are correlated with this variable. We then regress out the batch vector from all samples.
+
+`reduce.and.batch.orthogonalize.ace()` performs what we call *batch orthogonalization*.
+
+```{r}
+mm = model.matrix(~0+se$Batch)
+ace_orth = reduce.and.batch.orthogonalize.ace(se, design_mat = mm, reduction_slot = "orth")
+ace_orth = runACTIONet(ace_orth, layout_compactness = 100, reduction_slot = "orth")
+
+orth_batch = plot.ACTIONet(ace_orth, ace_orth$Batch) + ggtitle("Batch Ortho")
+orth_type = plot.ACTIONet(ace_orth, ace_orth$SubType) + ggtitle("Cell Type")
+ggpubr::ggarrange(orth_batch, orth_type)
+```
+
+Each method has it's prefered use cases and caveats, and there are data sets where each or either may not work. There are also deep learning-based approaches such as [scVI](https://github.com/scverse/scvi-tools) in Python as well as GPU implementations of MNN that can work quite well if properly implemented. There is another class of correction algorithms that employ *k*-means, such as [Harmony](https://portals.broadinstitute.org/harmony/). They try to correct by shifting entire clusters and squeezing them together. These methods, while once popular, we now know work very poorly and are highly destructive to the data, often smearing the signal or erasing entire populations by forcing them into the wrong cluster. We advice against using them although you may see them cited in older papers.
+
+It is important to note that methods for batch and covariate correction for visualization and clustering, and those for differential expression are different. We generally can not use correction algorithms for one on the other. They correct for different things enabling distinct downstream use cases. Once we have annotations and groupings based on batch-corrected cell-level data, we start again from the raw data when doing differential expression and batch correct that independently, if necessary.
+
+# Differential Expression
+
+Now that we have annotations for our cell types, we would like to do differential expression analysis. This differs little from how we've done it in the past. We will use the same tools and treat the data almost the same way.
+
+The data set we will use here consists solely of D2 spiny projection neurons from 6 mouse striatal samples (3 R6/2 HD model mice and 3 controls). We have seen this data before in some form.
+
+```{r}
+rm(list = ls()); invisible(gc()); # Clear workspace
+data_path = "data/p3_spn"
+se = readRDS(file.path(data_path, "se_spn_r62_subsampled.rds"))
+```
+
+We have only a single cell type here since we want to compare disease versus control for only D2 SPNs. If we had *N* cell types in our data set, we would split the data into *N* data sets and do the analysis on each *individually*. Of course there are exceptions based on the goal of the analysis, but that's the generic set up. Since we are looking at one cell type at a time, we have no need to retain the rare genes. Quite the contrary, as in bulk, we want to get rid of anything with low abundance or low variance. Here we'll be simple and just remove the bottom 10% of out genes. Then we'll normalize as usual.
+
+```{r}
+se = filter.ace(se, min_cells_per_feat = 0.1)
+se = normalize.ace(se)
+```
+
+Before we proceed with doing things the right way, let's look at how we used to do things in the ancient times which led to incorrect results (we did this in the assigned paper, shame on me).
+
+We will extract our filtered and normalized counts and run a simple rank-sum test. Yes, we actually used to do this.
+
+```{r}
+cts_norm = assays(se)$logcounts
+rownames(cts_norm) = rowData(se)$Gene
+
+res.wilcox = wilcoxauc(cts_norm, se$Condition)
+res.wilcox = res.wilcox[res.wilcox$group == "HD", ] # Extract HD vs. Control results
+```
+
+Now sort by fold-change and visualize the top and bottom genes.
+
+```{r}
+res.wilcox = res.wilcox[order(res.wilcox$logFC, decreasing = T), ]
+wilcox.top = rbind(head(res.wilcox, 5), tail(res.wilcox, 5))[, c("feature", "logFC", "padj")]
+print(wilcox.top)
+```
+
+There is clearly something wrong here. How can we have *p*-values of 0 or close to in a sparse and noisy data set with *n*=3?
+
+There are three major problems here (and many minor ones).
+
+1.  We are considering each cell a biological replicate. This is incorrect at best and fraudulent at worst. We know by the design of our experiment that the replicates are mice, not cells, and that our *n* is 3, not 1500.
+
+2.  We have no way of incorporating covariates into our model since this method, or any similar statistical implementation, does not allow complex design (there is no design matrix). These are isogenic mouse lines with identical samplings of cells. If we had any covariates such as age or sex or even differences in the number of cells across batches, they would confound the results and we would have no way of accounting for this.
+
+3.  The top DEGs will almost always be marker genes regardless of whether or not they actually change. This is because genes with high mean and variance will (falsely) appear to be significantly altered when we don't have a model fitted to unchanged features to identify outliers in our distribution.
+
+So what do we do? The answer is quite simple. We do what we've always done. We will bulk the data and apply the same tried and true techniques that have worked in the past. We call this *pseudobulking*. You can read [this paper](https://www.nature.com/articles/s41467-021-25960-2) which is one of many that explains why this works better, and why old fashioned single cell DEG analysis yielded mostly false positives and let to a reproducibility crisis in the single cell field.
+
+How do we go about bulking our data? There's a number of ways. The most common being either to take the sum or the mean across cells within each sample. The sum would give you a bulk profile of integer counts that could be fitted with a negative-binomial model. In other words take the sum and throw it into *DESeq2.* Alternatively, taking the mean would give you a continuous distribution that you could fit with a linear model using a tool such as *limma*. As we mentioned in the last problem set, this type of model is a bit more flexible, so that is what we will use.
+
+We have have six samples across two conditions, so lets split the data accordingly and aggregate each sample matrix into a vector of gene expression means.
+
+```{r}
+IDX = split(1:NCOL(cts_norm), interaction(se$Batch, se$Condition, drop = T))
+cts.pb = sapply(IDX, function(idx){
+  rowMeans(cts_norm[, idx])
+  })
+head(cts.pb)
+```
+
+As usual we need a data frame containing the metadata of the covariates. In this case, it's simply the condition.
+
+```{r}
+pseudobulk_metadata = data.frame(
+  Condition = stringr::str_split_fixed(colnames(cts.pb), pattern = "\\.", n = 2)[,2] %>% factor()
+  )
+
+pseudobulk_metadata$Condition = relevel(pseudobulk_metadata$Condition, ref = "Control")
+print(pseudobulk_metadata)
+```
+
+Now for the design matrix.
+
+```{r}
+design.mat = model.matrix(~Condition, data = pseudobulk_metadata)
+head(design.mat)
+```
+
+At this point you could run SVA or something similar, but it's not necessary for this data.
+
+Now we have everything we need to run *limma*, but we can do one more thing to take advantage of the alleged additional flexibility of the linear model. `lmFit()` allows us to assign a weight to each gene, making the model more robust to outliers by giving good genes more weight and bad genes little or no weight.
+
+What can we use as weights? Well single-cell gives us additional information that bulk does not, that is, the expression of a gene in individual cells. This means that we know that intra-sample variance of each gene, and we can use the inverse of this as a weight. That means that highly expressed genes with low variance will have the greatest weight and highly variable genes will have lower weights. Further we can set a limit and give zero weight to obvious outliers. We will give zero weight to all genes whose expression is 3 [absolute median deviations (MAD)](https://en.wikipedia.org/wiki/Median_absolute_deviation#:~:text=In%20statistics%2C%20the%20median%20absolute,MAD%20calculated%20from%20a%20sample.) away from the median, since these are either genes with too much variance (outliers) or no variance (also undesirable). We use MAD and median instead of standard deviation and mean because those statistics are sensitive to the very outliers we're trying to protect against. For purposes of numerical stability, and to avoid the possibility of dividing by zero at any point, we won't actually give anything a weight of 0, but instead convert zeros to some negligible value.
+
+```{r}
+#Compute variance of each gene per sample
+mat.vars = sapply(IDX, function(idx){
+  rowVars(cts_norm[, idx])
+  })
+W = 1/mat.vars
+
+# Filter by median absolute deviation
+W[!is.finite(W)] = 0
+W = apply(W, 1, function(w) {
+  upperLim = median(w + 3 * mad(w))
+  lowerLim = median(w - 3 * mad(w))
+  w[w < lowerLim | w > upperLim ] = 0
+  return(w)
+}) %>% Matrix::t()
+
+W[W == 0] = 1e-16 # stability and avoid division by zero
+```
+
+Now we can run `lmFit()` with our filtered inverse variance as weights. This will have no effect on the fold-changes, but will make the *p*-values much more accurate and reduce false positives.
+
+```{r}
+fit = lmFit(cts.pb, design = design.mat, weights = W)
+
+e = eBayes(fit, robust = T)
+
+res.limma = topTable(e, number = NROW(e), sort.by = "none")
+res.limma = data.frame(Gene = rownames(res.limma), res.limma)
+```
+
+Again, we sort by fold-change and visualize the top and bottom genes.
+
+```{r}
+res.limma = res.limma[order(res.limma$logFC, decreasing = T), ]
+limma.top = rbind(head(res.limma, 5), tail(res.limma, 5))[, c("Gene", "logFC", "adj.P.Val")]
+print(limma.top)
+```
+
+These numbers look far more reasonable and the genes are correct.
+
+# Homework Problem
+
+Now that you have a general idea of the process, you are ready to do all of this on your own. We have provided a respectably-sized and pre-curated mouse data set (one of the ones from the paper) for you to analyze from scratch and answer a few question along the way. The data was already downloaded when you ran the first chunk. Head to Part 3 on Canvas for the problem prompt.
