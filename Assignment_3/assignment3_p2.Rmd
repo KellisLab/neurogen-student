@@ -20,8 +20,8 @@ suppressPackageStartupMessages({
   library(limma)
 })
 
-# dir.create("data", recursive = T, showWarnings = F)
-# system("gsutil -m cp -r gs://neurogen-spring22-data/Assignment3/* data/")
+dir.create("data", recursive = T, showWarnings = F)
+system("gsutil -m cp -r gs://neurogen-spring22-data/Assignment3/* data/")
 ```
 
 # Background
