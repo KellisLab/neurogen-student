@@ -21,7 +21,7 @@ suppressPackageStartupMessages({
 })
 
 dir.create("data", recursive = T, showWarnings = F)
-system("gsutil -m cp -r mit-cmn-neurogen-course-data/Assignment3/* data/")
+system("gsutil -m cp -r gs://mit-cmn-neurogen-course-data/Assignment3/* data/")
 ```
 
 # Background
