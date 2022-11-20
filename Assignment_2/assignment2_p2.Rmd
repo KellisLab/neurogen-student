@@ -24,7 +24,7 @@ suppressPackageStartupMessages({
 })
 
 dir.create("data", recursive = T, showWarnings = F)
-system("gsutil -m cp -r gs://neurogen-spring22-data/Assignment2/* data/")
+system("gsutil -m cp -r gs://mit-cmn-neurogen-course-data/Assignment2/* data/")
 
 normalize.matrix <- function(S, log_transform = FALSE) {
     cs = Matrix::colSums(S)

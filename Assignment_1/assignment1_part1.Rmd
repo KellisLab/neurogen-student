@@ -17,7 +17,7 @@ Start by running this chunk which will load a necessary library and set up the w
 ```{r,warning=FALSE}
 library(dplyr, warn.conflicts = FALSE)
 pset_dat = c("p1_onset_vs_cag.tsv", "p2_de_counts_matrix.tsv")
-gcp_url = "https://storage.googleapis.com/neurogen-spring22-data/Assignment1"
+gcp_url = "https://storage.googleapis.com/mit-cmn-neurogen-course-data/Assignment1"
 write_path = file.path("data_assignment1")
 dir.create(write_path, showWarnings = F, recursive = T)
 sapply(pset_dat, function(s){
